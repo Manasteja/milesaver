@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="MileSaver - Find shortest routes with turn-by-turn directions">
+    <meta name="theme-color" content="#2563eb">
+    
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" type="image/png" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💰</text></svg>">
+    
+    <title>MileSaver - Save Miles, Save Money</title>
+    
+    <!-- Google Maps for Autocomplete - REPLACE YOUR_GOOGLE_KEY_HERE with your actual key -->
+    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0&libraries=places&callback=Function.prototype"></script>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>💰 MileSaver</h1>
+                <p class="tagline">Find Shortest Routes, Save Money</p>
+            </div>
+        </header>
+
+        <!-- Main Layout -->
+        <main class="main-layout">
+            <!-- LEFT SIDEBAR -->
+            <aside class="sidebar">
+                <!-- Input Card -->
+                <div class="card">
+                    <h2 class="card-title">📍 Route Details</h2>
+                    
+                    <div class="input-mode-toggle">
+                        <label>
+                            <input type="radio" name="input-mode" value="address" checked>
+                            <span>Address</span>
+                        </label>
+                        <label>
+                            <input type="radio" name="input-mode" value="coordinates">
+                            <span>Coords</span>
+                        </label>
+                    </div>
+                    
+                    <div id="address-inputs" class="input-container">
+                        <div class="input-group">
+                            <label><span class="icon">🟢</span> Start</label>
+                            <input type="text" id="start-location" placeholder="Type address..." autocomplete="off">
+                        </div>
+                        <div class="input-group">
+                            <label><span class="icon">🔴</span> End</label>
+                            <input type="text" id="end-location" placeholder="Type address..." autocomplete="off">
+                        </div>
+                    </div>
+                    
+                    <div id="coordinate-inputs" class="input-container hidden">
+                        <div class="input-group">
+                            <label><span class="icon">🟢</span> Start</label>
+                            <input type="text" id="start-coords" placeholder="47.6062, -122.0321" autocomplete="off">
+                        </div>
+                        <div class="input-group">
+                            <label><span class="icon">🔴</span> End</label>
+                            <input type="text" id="end-coords" placeholder="47.5301, -122.0357" autocomplete="off">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Preferences -->
+                <div class="card">
+                    <h3 class="card-subtitle">⚙️ Preferences</h3>
+                    <div class="setting-group">
+                        <label>Extra time OK: <strong id="time-tolerance-value">30</strong> min</label>
+                        <input type="range" id="time-tolerance" min="0" max="120" step="10" value="30">
+                        <small class="hint">How much extra time are you willing to accept to save miles?</small>
+                    </div>
+                    <div class="setting-group">
+                        <label>Trips/month: <strong id="trips-per-month-value">4</strong>x</label>
+                        <input type="range" id="trips-per-month" min="1" max="30" step="1" value="4">
+                    </div>
+                </div>
+
+                <!-- GPS Tracking Toggle -->
+                <div class="card">
+                    <div class="gps-toggle">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="gps-tracking">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <div class="toggle-info">
+                            <div class="toggle-label">📍 Live GPS Tracking</div>
+                            <small>Follow your position in real-time</small>
+                        </div>
+                    </div>
+                    <div id="gps-status" class="gps-status hidden"></div>
+                </div>
+
+                <!-- Search Button -->
+                <button id="search-btn" class="search-btn">
+                    <span class="icon">🔍</span> Find Best Route
+                </button>
+
+                <!-- Error Message -->
+                <div id="error-message" class="error-message hidden"></div>
+
+                <!-- RESULTS SECTION -->
+                <div id="results-section" class="results-section hidden">
+                    <!-- Recommendation -->
+                    <div id="recommendation-card" class="recommendation-card"></div>
+
+                    <!-- Route Comparison -->
+                    <div class="routes-comparison-compact">
+                        <div class="route-card-compact shortest clickable" data-route="shortest">
+                            <div class="route-header">Shortest</div>
+                            <div class="route-stat">
+                                <span id="shortest-distance" class="stat-value">-</span>
+                                <span class="stat-label">mi</span>
+                            </div>
+                            <div class="route-time" id="shortest-duration">-</div>
+                            <small class="route-hint">Click for directions</small>
+                        </div>
+                        <div class="route-card-compact fastest clickable" data-route="fastest">
+                            <div class="route-header">Fastest</div>
+                            <div class="route-stat">
+                                <span id="fastest-distance" class="stat-value">-</span>
+                                <span class="stat-label">mi</span>
+                            </div>
+                            <div class="route-time" id="fastest-duration">-</div>
+                            <small class="route-hint">Click for directions</small>
+                        </div>
+                    </div>
+
+                    <!-- Savings -->
+                    <div class="savings-card-compact">
+                        <div class="savings-header">💰 Your Savings</div>
+                        <div class="savings-row">
+                            <span>Per Trip:</span>
+                            <span id="miles-saved" class="savings-value">-</span>
+                        </div>
+                        <div class="savings-row">
+                            <span>Monthly Miles:</span>
+                            <span id="monthly-miles" class="savings-value">-</span>
+                        </div>
+                        <div class="savings-row">
+                            <span>Monthly $:</span>
+                            <span id="monthly-savings" class="savings-value">-</span>
+                        </div>
+                        <div class="savings-row total">
+                            <span>Annual:</span>
+                            <span id="annual-savings" class="savings-value-large">-</span>
+                        </div>
+                    </div>
+
+                    <!-- TURN-BY-TURN DIRECTIONS PANEL -->
+                    <div id="directions-panel" class="directions-panel hidden">
+                        <div class="directions-header">
+                            <h3 id="directions-title">📍 Turn-by-Turn Directions</h3>
+                            <button id="close-directions" class="close-btn">✕</button>
+                        </div>
+                        <div id="directions-content" class="directions-content"></div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- RIGHT: LARGE MAP -->
+            <section class="map-section-large">
+                <div id="map" class="map-container-large"></div>
+                <div id="loading-spinner" class="loading-spinner hidden">
+                    <div class="spinner"></div>
+                    <p>Finding routes...</p>
+                </div>
+                <div id="map-legend" class="map-legend hidden">
+                    <div class="legend-title">Routes</div>
+                    <div class="legend-item">
+                        <span class="legend-line shortest"></span>
+                        <span class="legend-text"><strong>Shortest</strong></span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-line fastest"></span>
+                        <span class="legend-text"><strong>Fastest</strong></span>
+                    </div>
+                    <div id="user-location-legend" class="legend-item hidden">
+                        <span class="legend-icon">📍</span>
+                        <span class="legend-text"><strong>Your Location</strong></span>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="app.js"></script>
+    
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('service-worker.js')
+                    .catch(err => console.log('SW failed'));
+            });
+        }
+    </script>
+</body>
+</html>
