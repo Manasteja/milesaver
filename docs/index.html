@@ -2,12 +2,15 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <meta name="description" content="MileSaver - Find shortest routes with turn-by-turn directions">
     <meta name="theme-color" content="#2563eb">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     
     <link rel="manifest" href="manifest.json">
     <link rel="icon" type="image/png" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💰</text></svg>">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💰</text></svg>">
     
     <title>MileSaver - Save Miles, Save Money</title>
     
@@ -49,7 +52,12 @@
                     <div id="address-inputs" class="input-container">
                         <div class="input-group">
                             <label><span class="icon">🟢</span> Start</label>
-                            <input type="text" id="start-location" placeholder="Type address..." autocomplete="off">
+                            <div class="input-with-button">
+                                <input type="text" id="start-location" placeholder="Type address..." autocomplete="off">
+                                <button type="button" id="use-my-location-btn" class="location-btn" title="Use my current location">
+                                    📍
+                                </button>
+                            </div>
                         </div>
                         <div class="input-group">
                             <label><span class="icon">🔴</span> End</label>
@@ -60,7 +68,12 @@
                     <div id="coordinate-inputs" class="input-container hidden">
                         <div class="input-group">
                             <label><span class="icon">🟢</span> Start</label>
-                            <input type="text" id="start-coords" placeholder="47.6062, -122.0321" autocomplete="off">
+                            <div class="input-with-button">
+                                <input type="text" id="start-coords" placeholder="47.6062, -122.0321" autocomplete="off">
+                                <button type="button" id="use-my-location-coords-btn" class="location-btn" title="Use my current location">
+                                    📍
+                                </button>
+                            </div>
                         </div>
                         <div class="input-group">
                             <label><span class="icon">🔴</span> End</label>
@@ -91,8 +104,8 @@
                             <span class="toggle-slider"></span>
                         </label>
                         <div class="toggle-info">
-                            <div class="toggle-label">📍 Live GPS Tracking</div>
-                            <small>Follow your position in real-time</small>
+                            <div class="toggle-label">📍 Live Navigation Mode</div>
+                            <small>Map follows your position</small>
                         </div>
                     </div>
                     <div id="gps-status" class="gps-status hidden"></div>
@@ -170,6 +183,12 @@
                     <div class="spinner"></div>
                     <p>Finding routes...</p>
                 </div>
+                
+                <!-- Re-center button (shows when GPS is active) -->
+                <button id="recenter-btn" class="recenter-btn hidden" title="Center map on my location">
+                    🎯
+                </button>
+                
                 <div id="map-legend" class="map-legend hidden">
                     <div class="legend-title">Routes</div>
                     <div class="legend-item">
@@ -181,8 +200,8 @@
                         <span class="legend-text"><strong>Fastest</strong></span>
                     </div>
                     <div id="user-location-legend" class="legend-item hidden">
-                        <span class="legend-icon">📍</span>
-                        <span class="legend-text"><strong>Your Location</strong></span>
+                        <span class="legend-icon">🔵</span>
+                        <span class="legend-text"><strong>You</strong></span>
                     </div>
                 </div>
             </section>
