@@ -11,7 +11,7 @@
     
     <title>MileSaver - Save Miles, Save Money</title>
     
-    <!-- Google Maps for Autocomplete - REPLACE YOUR_GOOGLE_KEY_HERE with your actual key -->
+    <!-- Google Maps API with Places Library -->
     <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0&libraries=places&callback=Function.prototype"></script>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -117,7 +117,6 @@
                             <div class="route-header">Shortest</div>
                             <div class="route-stat">
                                 <span id="shortest-distance" class="stat-value">-</span>
-                                <span class="stat-label">mi</span>
                             </div>
                             <div class="route-time" id="shortest-duration">-</div>
                             <small class="route-hint">Click for directions</small>
@@ -126,7 +125,6 @@
                             <div class="route-header">Fastest</div>
                             <div class="route-stat">
                                 <span id="fastest-distance" class="stat-value">-</span>
-                                <span class="stat-label">mi</span>
                             </div>
                             <div class="route-time" id="fastest-duration">-</div>
                             <small class="route-hint">Click for directions</small>

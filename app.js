@@ -1,6 +1,6 @@
 /**
- * MileSaver - ULTIMATE PRODUCTION VERSION
- * Features: Turn-by-turn directions, GPS tracking, Autocomplete, 120min tolerance
+ * MileSaver - ULTIMATE PRODUCTION VERSION (FIXED)
+ * Features: Turn-by-turn directions, GPS tracking, Autocomplete (with fallback), 120min tolerance
  */
 
 const CONFIG = {
@@ -24,7 +24,8 @@ const state = {
     fastestRouteData: null,
     gpsWatchId: null,
     autocompleteStart: null,
-    autocompleteEnd: null
+    autocompleteEnd: null,
+    autocompleteEnabled: false
 };
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -33,7 +34,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function initializeApp() {
     initializeMap();
-    initializeAutocomplete();
+    
+    // Delay autocomplete init to let Google Maps fully load
+    setTimeout(() => {
+        initializeAutocomplete();
+    }, 500);
     
     document.getElementById('search-btn').addEventListener('click', handleSearch);
     document.getElementById('gps-tracking').addEventListener('change', handleGPSToggle);
@@ -67,18 +72,54 @@ function initializeApp() {
 }
 
 // ==========================================
-// GOOGLE PLACES AUTOCOMPLETE
+// GOOGLE PLACES AUTOCOMPLETE (WITH FALLBACK)
 // ==========================================
 
 function initializeAutocomplete() {
-    if (typeof google === 'undefined' || !google.maps || !google.maps.places) {
-        console.warn('Google Maps not loaded. Autocomplete disabled.');
-        return;
-    }
-    
     const startInput = document.getElementById('start-location');
     const endInput = document.getElementById('end-location');
     
+    // Check if Google Maps API loaded properly
+    if (typeof google === 'undefined' || !google.maps) {
+        console.warn('Google Maps not loaded. Using manual address entry.');
+        enableManualInput(startInput, endInput);
+        return;
+    }
+    
+    // Check if Places library is available
+    if (!google.maps.places) {
+        console.warn('Google Places library not available. Using manual address entry.');
+        enableManualInput(startInput, endInput);
+        return;
+    }
+    
+    // Check if the API is properly activated by testing
+    try {
+        const testDiv = document.createElement('div');
+        const testService = new google.maps.places.AutocompleteService();
+        
+        // Test the service with a simple request
+        testService.getPlacePredictions(
+            { input: 'test', types: ['geocode'] },
+            (predictions, status) => {
+                if (status === google.maps.places.PlacesServiceStatus.REQUEST_DENIED ||
+                    status === google.maps.places.PlacesServiceStatus.OVER_QUERY_LIMIT) {
+                    console.warn('Google Places API not activated or over limit. Using manual entry.');
+                    enableManualInput(startInput, endInput);
+                    return;
+                }
+                
+                // API is working, set up autocomplete
+                setupGoogleAutocomplete(startInput, endInput);
+            }
+        );
+    } catch (err) {
+        console.warn('Autocomplete initialization failed:', err.message);
+        enableManualInput(startInput, endInput);
+    }
+}
+
+function setupGoogleAutocomplete(startInput, endInput) {
     const options = {
         types: ['geocode', 'establishment'],
         componentRestrictions: { country: 'us' }
@@ -87,10 +128,51 @@ function initializeAutocomplete() {
     try {
         state.autocompleteStart = new google.maps.places.Autocomplete(startInput, options);
         state.autocompleteEnd = new google.maps.places.Autocomplete(endInput, options);
+        state.autocompleteEnabled = true;
+        
+        // Add place_changed listeners
+        state.autocompleteStart.addListener('place_changed', () => {
+            const place = state.autocompleteStart.getPlace();
+            if (place.geometry) {
+                console.log('Start place selected:', place.formatted_address);
+            }
+        });
+        
+        state.autocompleteEnd.addListener('place_changed', () => {
+            const place = state.autocompleteEnd.getPlace();
+            if (place.geometry) {
+                console.log('End place selected:', place.formatted_address);
+            }
+        });
+        
         console.log('✓ Google Autocomplete enabled!');
     } catch (err) {
-        console.warn('Autocomplete failed:', err.message);
+        console.warn('Autocomplete setup failed:', err.message);
+        enableManualInput(startInput, endInput);
     }
+}
+
+function enableManualInput(startInput, endInput) {
+    // Remove any Google autocomplete that might be partially attached
+    if (state.autocompleteStart) {
+        google.maps.event.clearInstanceListeners(state.autocompleteStart);
+        state.autocompleteStart = null;
+    }
+    if (state.autocompleteEnd) {
+        google.maps.event.clearInstanceListeners(state.autocompleteEnd);
+        state.autocompleteEnd = null;
+    }
+    
+    // Ensure inputs are fully functional
+    startInput.removeAttribute('disabled');
+    endInput.removeAttribute('disabled');
+    
+    // Update placeholder to guide user
+    startInput.placeholder = 'Enter city, state (e.g., Seattle, WA)';
+    endInput.placeholder = 'Enter city, state (e.g., Portland, OR)';
+    
+    state.autocompleteEnabled = false;
+    console.log('Manual address entry mode enabled. Use format: City, State');
 }
 
 function initializeMap() {
@@ -225,21 +307,29 @@ async function handleSearch() {
         const start = await geocodeAddress(startLocation);
         const end = await geocodeAddress(endLocation);
         
+        console.log('Start coords:', start);
+        console.log('End coords:', end);
+        
         state.startCoords = start;
         state.endCoords = end;
         
         addMarkers(start, end);
         
-        // Fetch routes WITH INSTRUCTIONS
-        const routes = await fetchAllRouteOptions(start, end, true);
+        // Fetch routes WITH instructions
+        const routes = await fetchMultipleRoutes(start, end, true);
         
-        const { shortestRoute, fastestRoute } = selectBestRoutes(routes);
+        if (routes.length < 2) {
+            console.warn('Only one route found, duplicating');
+            routes.push({ ...routes[0] });
+        }
         
-        // Store full route data for directions
+        const sorted = [...routes].sort((a, b) => a.distance - b.distance);
+        const shortestRoute = sorted[0];
+        const fastestRoute = [...routes].sort((a, b) => a.duration - b.duration)[0];
+        
+        // Store route data for directions panel
         state.shortestRouteData = shortestRoute;
         state.fastestRouteData = fastestRoute;
-        
-        console.log('✓ Routes with directions ready');
         
         const comparison = {
             shortestRoute,
@@ -249,13 +339,12 @@ async function handleSearch() {
         };
         
         state.routeComparison = comparison;
-        
-        displayResults(comparison);
         drawRoutes(shortestRoute, fastestRoute);
+        displayResults(comparison);
         
     } catch (error) {
         console.error('Search error:', error);
-        showError(error.message || 'Failed to find routes. Please try again.');
+        showError(error.message || 'Failed to find routes');
     } finally {
         hideLoading();
     }
@@ -268,8 +357,8 @@ async function handleSearch() {
 function showDirections(routeType) {
     const routeData = routeType === 'shortest' ? state.shortestRouteData : state.fastestRouteData;
     
-    if (!routeData || !routeData.instructions) {
-        showError('No directions available for this route');
+    if (!routeData || !routeData.instructions || routeData.instructions.length === 0) {
+        console.warn('No instructions available for this route');
         return;
     }
     
@@ -277,160 +366,143 @@ function showDirections(routeType) {
     const title = document.getElementById('directions-title');
     const content = document.getElementById('directions-content');
     
-    title.textContent = routeType === 'shortest' ? '📏 Shortest Route Directions' : '🚗 Fastest Route Directions';
+    title.textContent = routeType === 'shortest' ? '📍 Shortest Route Directions' : '📍 Fastest Route Directions';
     
-    // Build turn-by-turn HTML
-    let html = `
-        <div class="route-summary">
-            <div class="summary-item">
-                <strong>Total Distance:</strong> ${routeData.distance.toFixed(2)} miles
-            </div>
-            <div class="summary-item">
-                <strong>Estimated Time:</strong> ${formatDuration(routeData.duration)}
-            </div>
-        </div>
-        <div class="directions-list">
-    `;
+    let html = '<ol class="directions-list">';
     
     routeData.instructions.forEach((step, index) => {
         const icon = getDirectionIcon(step.type);
+        const distance = step.distance ? `${(step.distance * 0.000621371).toFixed(2)} mi` : '';
+        
         html += `
-            <div class="direction-step">
-                <div class="step-number">${index + 1}</div>
-                <div class="step-icon">${icon}</div>
+            <li class="direction-step">
+                <span class="step-icon">${icon}</span>
                 <div class="step-content">
-                    <div class="step-instruction">${step.instruction}</div>
-                    <div class="step-details">
-                        ${step.distance > 0 ? `${(step.distance / 1609.34).toFixed(2)} mi` : ''} 
-                        ${step.name ? `• ${step.name}` : ''}
-                    </div>
+                    <span class="step-instruction">${step.instruction}</span>
+                    ${distance ? `<span class="step-distance">${distance}</span>` : ''}
                 </div>
-            </div>
+            </li>
         `;
     });
     
-    html += '</div>';
+    html += '</ol>';
+    
+    // Add summary at bottom
+    html += `
+        <div class="directions-summary">
+            <strong>Total:</strong> ${routeData.distance.toFixed(2)} mi • ${formatDuration(routeData.duration)}
+        </div>
+    `;
+    
     content.innerHTML = html;
     panel.classList.remove('hidden');
     
-    // Scroll to top of directions
-    panel.scrollTop = 0;
+    // Highlight selected route on map
+    highlightRoute(routeType);
 }
 
 function getDirectionIcon(type) {
     const icons = {
-        0: '⬆️', // straight
-        1: '↗️', // slight right
-        2: '➡️', // right
-        3: '↘️', // sharp right
-        4: '⤵️', // u-turn
-        5: '↙️', // sharp left
-        6: '⬅️', // left
-        7: '↖️', // slight left
-        10: '🎯', // arrive
-        11: '🚀', // depart
-        12: '⭕', // roundabout
+        0: '📍', // Start
+        1: '⬆️', // Continue
+        2: '↗️', // Slight right
+        3: '➡️', // Right
+        4: '↘️', // Sharp right
+        5: '↩️', // U-turn
+        6: '↙️', // Sharp left
+        7: '⬅️', // Left
+        8: '↖️', // Slight left
+        9: '🔄', // Roundabout
+        10: '🏁', // Arrive
+        11: '🛣️', // Enter highway
+        12: '🚗', // Exit highway
+        13: '🔀'  // Fork
     };
     return icons[type] || '➡️';
 }
 
+function highlightRoute(routeType) {
+    // Reset both routes to default styles
+    if (state.shortestRouteLayer) {
+        state.shortestRouteLayer.setStyle({ opacity: routeType === 'shortest' ? 1 : 0.4, weight: routeType === 'shortest' ? 10 : 6 });
+    }
+    if (state.fastestRouteLayer) {
+        state.fastestRouteLayer.setStyle({ opacity: routeType === 'fastest' ? 1 : 0.4, weight: routeType === 'fastest' ? 10 : 6 });
+    }
+}
+
 function closeDirections() {
     document.getElementById('directions-panel').classList.add('hidden');
-}
-
-// ==========================================
-// GEOCODING & ROUTING
-// ==========================================
-
-function selectBestRoutes(routes) {
-    if (routes.length === 0) throw new Error('No routes found');
     
-    const byDistance = [...routes].sort((a, b) => a.distance - b.distance);
-    const byTime = [...routes].sort((a, b) => a.duration - b.duration);
-    
-    let shortestRoute = byDistance[0];
-    let fastestRoute = byTime[0];
-    
-    const distanceDiff = Math.abs(shortestRoute.distance - fastestRoute.distance);
-    const timeDiff = Math.abs(shortestRoute.duration - fastestRoute.duration);
-    
-    if (distanceDiff < 0.5 && timeDiff < 2) {
-        for (const route of byTime) {
-            if (Math.abs(shortestRoute.distance - route.distance) >= 1.0) {
-                fastestRoute = route;
-                break;
-            }
-        }
+    // Reset route styles
+    if (state.shortestRouteLayer) {
+        state.shortestRouteLayer.setStyle({ opacity: 0.9, weight: 8 });
     }
-    
-    return { shortestRoute, fastestRoute };
+    if (state.fastestRouteLayer) {
+        state.fastestRouteLayer.setStyle({ opacity: 0.6, weight: 8 });
+    }
 }
+
+// ==========================================
+// GEOCODING (Using Nominatim - FREE!)
+// ==========================================
 
 async function geocodeAddress(address) {
-    const coordMatch = address.match(/^(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)$/);
+    // Check if it's already coordinates
+    const coordMatch = address.match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
     if (coordMatch) {
-        return { 
-            lat: parseFloat(coordMatch[1]), 
-            lon: parseFloat(coordMatch[2]), 
-            displayName: `${coordMatch[1]}, ${coordMatch[2]}` 
-        };
-    }
-    
-    if (CONFIG.GOOGLE_API_KEY && CONFIG.GOOGLE_API_KEY !== 'YOUR_GOOGLE_KEY_HERE') {
-        try {
-            return await geocodeWithGoogle(address);
-        } catch (err) {
-            console.log('Using Nominatim fallback...');
-        }
-    }
-    
-    return await geocodeWithNominatim(address);
-}
-
-async function geocodeWithGoogle(address) {
-    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${CONFIG.GOOGLE_API_KEY}`;
-    const response = await fetch(url);
-    const data = await response.json();
-    
-    if (data.status === 'OK' && data.results.length > 0) {
-        const location = data.results[0].geometry.location;
         return {
-            lat: location.lat,
-            lon: location.lng,
-            displayName: data.results[0].formatted_address
+            lat: parseFloat(coordMatch[1]),
+            lon: parseFloat(coordMatch[2])
         };
     }
-    throw new Error('Geocoding failed');
+    
+    // Use Nominatim for geocoding (free, no API key needed)
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1&countrycodes=us`;
+    
+    try {
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent': 'MileSaver-WebApp'
+            }
+        });
+        
+        if (!response.ok) {
+            throw new Error('Geocoding service unavailable');
+        }
+        
+        const data = await response.json();
+        
+        if (data.length === 0) {
+            throw new Error(`Could not find location: "${address}". Try format: City, State`);
+        }
+        
+        return {
+            lat: parseFloat(data[0].lat),
+            lon: parseFloat(data[0].lon)
+        };
+    } catch (err) {
+        console.error('Geocoding error:', err);
+        throw new Error(`Could not find location: "${address}". Try format: City, State`);
+    }
 }
 
-async function geocodeWithNominatim(address) {
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1&countrycodes=us`;
-    const response = await fetch(url, { headers: { 'User-Agent': 'MileSaver/1.0' } });
-    const data = await response.json();
-    
-    if (!data || data.length === 0) throw new Error(`Could not find: "${address}"`);
-    
-    return {
-        lat: parseFloat(data[0].lat),
-        lon: parseFloat(data[0].lon),
-        displayName: data[0].display_name
-    };
-}
+// ==========================================
+// ROUTE FETCHING (OpenRouteService)
+// ==========================================
 
-async function fetchAllRouteOptions(start, end, withInstructions = false) {
-    console.log('🔍 Fetching routes with turn-by-turn directions...');
+async function fetchMultipleRoutes(start, end, withInstructions = false) {
+    const routes = [];
     
     const strategies = [
-        { pref: 'recommended', avoid: [] },
         { pref: 'shortest', avoid: [] },
         { pref: 'fastest', avoid: [] },
         { pref: 'shortest', avoid: ['highways'] },
-        { pref: 'shortest', avoid: ['tollways'] },
-        { pref: 'fastest', avoid: ['highways'] },
-        { pref: 'recommended', avoid: ['highways'] },
+        { pref: 'fastest', avoid: ['tollways'] },
+        { pref: 'recommended', avoid: [] }
     ];
     
-    const routes = [];
+    console.log('Fetching routes with multiple strategies...');
     
     for (const strategy of strategies) {
         try {
