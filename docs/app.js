@@ -1,7 +1,7 @@
 /**
- * MileSaver - ULTIMATE PRODUCTION VERSION (FULLY FIXED)
- * Features: Turn-by-turn directions, GPS tracking, Google Autocomplete with coordinates, 120min tolerance
- * Fixes: Address recognition from Google Autocomplete, correct distance display in directions
+ * MileSaver - ULTIMATE PRODUCTION VERSION (SHIP-READY)
+ * Features: Turn-by-turn directions, GPS tracking, Google Autocomplete
+ * Fixed: Proper distance display in directions (feet for short, miles for long)
  */
 
 const CONFIG = {
@@ -27,7 +27,6 @@ const state = {
     autocompleteStart: null,
     autocompleteEnd: null,
     autocompleteEnabled: false,
-    // Store coordinates from Google Autocomplete
     googleStartCoords: null,
     googleEndCoords: null
 };
@@ -39,7 +38,6 @@ document.addEventListener('DOMContentLoaded', () => {
 function initializeApp() {
     initializeMap();
     
-    // Delay autocomplete init to let Google Maps fully load
     setTimeout(() => {
         initializeAutocomplete();
     }, 500);
@@ -48,7 +46,6 @@ function initializeApp() {
     document.getElementById('gps-tracking').addEventListener('change', handleGPSToggle);
     document.getElementById('close-directions').addEventListener('click', closeDirections);
     
-    // Route card click handlers
     document.querySelectorAll('.route-card-compact').forEach(card => {
         card.addEventListener('click', () => {
             const routeType = card.dataset.route;
@@ -72,7 +69,6 @@ function initializeApp() {
         document.getElementById('trips-per-month-value').textContent = e.target.value;
     });
     
-    // Clear Google coords when user manually edits input
     document.getElementById('start-location').addEventListener('input', () => {
         state.googleStartCoords = null;
     });
@@ -80,26 +76,19 @@ function initializeApp() {
         state.googleEndCoords = null;
     });
     
-    console.log('MileSaver ULTIMATE initialized!');
+    console.log('MileSaver SHIP-READY initialized!');
 }
 
 // ==========================================
-// GOOGLE PLACES AUTOCOMPLETE (FIXED)
+// GOOGLE PLACES AUTOCOMPLETE
 // ==========================================
 
 function initializeAutocomplete() {
     const startInput = document.getElementById('start-location');
     const endInput = document.getElementById('end-location');
     
-    // Check if Google Maps API loaded properly
-    if (typeof google === 'undefined' || !google.maps) {
+    if (typeof google === 'undefined' || !google.maps || !google.maps.places) {
         console.warn('Google Maps not loaded. Using manual address entry.');
-        return;
-    }
-    
-    // Check if Places library is available
-    if (!google.maps.places) {
-        console.warn('Google Places library not available. Using manual address entry.');
         return;
     }
     
@@ -113,7 +102,6 @@ function initializeAutocomplete() {
         state.autocompleteEnd = new google.maps.places.Autocomplete(endInput, options);
         state.autocompleteEnabled = true;
         
-        // IMPORTANT: Capture coordinates when user selects a place
         state.autocompleteStart.addListener('place_changed', () => {
             const place = state.autocompleteStart.getPlace();
             if (place.geometry && place.geometry.location) {
@@ -121,7 +109,7 @@ function initializeAutocomplete() {
                     lat: place.geometry.location.lat(),
                     lon: place.geometry.location.lng()
                 };
-                console.log('✓ Start location set from Google:', place.formatted_address, state.googleStartCoords);
+                console.log('✓ Start location set:', place.formatted_address);
             }
         });
         
@@ -132,7 +120,7 @@ function initializeAutocomplete() {
                     lat: place.geometry.location.lat(),
                     lon: place.geometry.location.lng()
                 };
-                console.log('✓ End location set from Google:', place.formatted_address, state.googleEndCoords);
+                console.log('✓ End location set:', place.formatted_address);
             }
         });
         
@@ -258,7 +246,6 @@ async function handleSearch() {
         let start, end;
         
         if (mode === 'coordinates') {
-            // Coordinate mode - parse directly
             const startLocation = document.getElementById('start-coords').value.trim();
             const endLocation = document.getElementById('end-coords').value.trim();
             
@@ -269,7 +256,6 @@ async function handleSearch() {
             start = parseCoordinates(startLocation);
             end = parseCoordinates(endLocation);
         } else {
-            // Address mode - use Google coords if available, otherwise geocode
             const startLocation = document.getElementById('start-location').value.trim();
             const endLocation = document.getElementById('end-location').value.trim();
             
@@ -279,7 +265,6 @@ async function handleSearch() {
             
             console.log(`Searching: "${startLocation}" → "${endLocation}"`);
             
-            // Use Google coordinates if available (from autocomplete selection)
             if (state.googleStartCoords) {
                 start = state.googleStartCoords;
                 console.log('Using Google coords for start:', start);
@@ -302,7 +287,6 @@ async function handleSearch() {
         
         addMarkers(start, end);
         
-        // Fetch routes WITH instructions
         const routes = await fetchMultipleRoutes(start, end, true);
         
         if (routes.length < 2) {
@@ -314,7 +298,6 @@ async function handleSearch() {
         const shortestRoute = sorted[0];
         const fastestRoute = [...routes].sort((a, b) => a.duration - b.duration)[0];
         
-        // Store route data for directions panel
         state.shortestRouteData = shortestRoute;
         state.fastestRouteData = fastestRoute;
         
@@ -349,8 +332,34 @@ function parseCoordinates(coordString) {
 }
 
 // ==========================================
-// TURN-BY-TURN DIRECTIONS (FIXED DISTANCES)
+// TURN-BY-TURN DIRECTIONS (FIXED!)
 // ==========================================
+
+function formatStepDistance(distanceValue, isInMiles = false) {
+    // Handle missing or zero values
+    if (distanceValue === 0 || distanceValue === undefined || distanceValue === null) {
+        return '';
+    }
+    
+    let miles, feet;
+    
+    if (isInMiles) {
+        // Distance is already in miles
+        miles = distanceValue;
+        feet = distanceValue * 5280;
+    } else {
+        // Distance is in meters
+        feet = distanceValue * 3.28084;
+        miles = distanceValue * 0.000621371;
+    }
+    
+    // Show feet for distances under 0.1 miles (528 feet)
+    if (feet < 528) {
+        return `${Math.round(feet)} ft`;
+    } else {
+        return `${miles.toFixed(2)} mi`;
+    }
+}
 
 function showDirections(routeType) {
     const routeData = routeType === 'shortest' ? state.shortestRouteData : state.fastestRouteData;
@@ -370,8 +379,10 @@ function showDirections(routeType) {
     
     routeData.instructions.forEach((step, index) => {
         const icon = getDirectionIcon(step.type);
-        // Distance is already in miles from our processing
-        const distanceText = step.distanceMiles > 0 ? `${step.distanceMiles.toFixed(2)} mi` : '';
+        
+        // The API returns distance in meters for steps (regardless of units param)
+        // We stored it as distanceMeters
+        const distanceText = formatStepDistance(step.distanceMeters, false);
         
         html += `
             <li class="direction-step">
@@ -386,17 +397,18 @@ function showDirections(routeType) {
     
     html += '</ol>';
     
-    // Add summary at bottom
     html += `
         <div class="directions-summary">
             <strong>Total:</strong> ${routeData.distance.toFixed(2)} mi • ${formatDuration(routeData.duration)}
+        </div>
+        <div class="directions-note">
+            <small>📌 Distances may vary slightly from Google Maps (different routing data sources).</small>
         </div>
     `;
     
     content.innerHTML = html;
     panel.classList.remove('hidden');
     
-    // Highlight selected route on map
     highlightRoute(routeType);
 }
 
@@ -421,19 +433,23 @@ function getDirectionIcon(type) {
 }
 
 function highlightRoute(routeType) {
-    // Reset both routes to default styles
     if (state.shortestRouteLayer) {
-        state.shortestRouteLayer.setStyle({ opacity: routeType === 'shortest' ? 1 : 0.4, weight: routeType === 'shortest' ? 10 : 6 });
+        state.shortestRouteLayer.setStyle({ 
+            opacity: routeType === 'shortest' ? 1 : 0.4, 
+            weight: routeType === 'shortest' ? 10 : 6 
+        });
     }
     if (state.fastestRouteLayer) {
-        state.fastestRouteLayer.setStyle({ opacity: routeType === 'fastest' ? 1 : 0.4, weight: routeType === 'fastest' ? 10 : 6 });
+        state.fastestRouteLayer.setStyle({ 
+            opacity: routeType === 'fastest' ? 1 : 0.4, 
+            weight: routeType === 'fastest' ? 10 : 6 
+        });
     }
 }
 
 function closeDirections() {
     document.getElementById('directions-panel').classList.add('hidden');
     
-    // Reset route styles
     if (state.shortestRouteLayer) {
         state.shortestRouteLayer.setStyle({ opacity: 0.9, weight: 8 });
     }
@@ -443,11 +459,10 @@ function closeDirections() {
 }
 
 // ==========================================
-// GEOCODING (Nominatim fallback + Google)
+// GEOCODING
 // ==========================================
 
 async function geocodeAddress(address) {
-    // Check if it's already coordinates
     const coordMatch = address.match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
     if (coordMatch) {
         return {
@@ -456,12 +471,11 @@ async function geocodeAddress(address) {
         };
     }
     
-    // Try Google Geocoding first (more accurate for addresses)
     if (CONFIG.GOOGLE_API_KEY) {
         try {
             const googleResult = await geocodeWithGoogle(address);
             if (googleResult) {
-                console.log('Geocoded with Google:', address, googleResult);
+                console.log('Geocoded with Google:', address);
                 return googleResult;
             }
         } catch (err) {
@@ -469,7 +483,6 @@ async function geocodeAddress(address) {
         }
     }
     
-    // Fallback to Nominatim for city names
     return await geocodeWithNominatim(address);
 }
 
@@ -499,9 +512,7 @@ async function geocodeWithNominatim(address) {
     
     try {
         const response = await fetch(url, {
-            headers: {
-                'User-Agent': 'MileSaver-WebApp'
-            }
+            headers: { 'User-Agent': 'MileSaver-WebApp' }
         });
         
         if (!response.ok) {
@@ -511,7 +522,7 @@ async function geocodeWithNominatim(address) {
         const data = await response.json();
         
         if (data.length === 0) {
-            throw new Error(`Could not find location: "${address}". Try selecting from the dropdown or use format: City, State`);
+            throw new Error(`Could not find location: "${address}". Try selecting from the dropdown.`);
         }
         
         return {
@@ -520,7 +531,7 @@ async function geocodeWithNominatim(address) {
         };
     } catch (err) {
         console.error('Nominatim error:', err);
-        throw new Error(`Could not find location: "${address}". Try selecting from the dropdown suggestions.`);
+        throw new Error(`Could not find location: "${address}". Try selecting from dropdown suggestions.`);
     }
 }
 
@@ -539,7 +550,7 @@ async function fetchMultipleRoutes(start, end, withInstructions = false) {
         { pref: 'recommended', avoid: [] }
     ];
     
-    console.log('Fetching routes with multiple strategies...');
+    console.log('Fetching routes...');
     
     for (const strategy of strategies) {
         try {
@@ -559,7 +570,7 @@ async function fetchRouteWithStrategy(start, end, preference, avoidFeatures, wit
     const body = {
         coordinates: [[start.lon, start.lat], [end.lon, end.lat]],
         preference,
-        units: 'mi',
+        units: 'm',  // Request meters for consistency - we'll convert to miles ourselves
         instructions: withInstructions,
         geometry: true
     };
@@ -586,16 +597,24 @@ async function fetchRouteWithStrategy(start, end, preference, avoidFeatures, wit
     const segments = route.segments || [];
     const instructions = segments.flatMap(seg => seg.steps || []);
     
+    // Debug: log the raw step data
+    if (instructions.length > 0) {
+        console.log('Raw step data sample:', JSON.stringify(instructions[0]));
+        console.log('Step distance value:', instructions[0].distance);
+    }
+    
+    // Convert summary distance from meters to miles
+    const distanceInMiles = route.summary.distance * 0.000621371;
+    
     return {
-        distance: route.summary.distance,  // Already in miles because we set units: 'mi'
-        duration: route.summary.duration / 60,  // Convert seconds to minutes
+        distance: distanceInMiles,
+        duration: route.summary.duration / 60,  // seconds to minutes
         geometry: route.geometry,
         strategy: preference,
         instructions: instructions.map(step => ({
-            instruction: step.instruction,
+            instruction: step.instruction || 'Continue',
+            // Step distance is in meters
             distanceMeters: step.distance || 0,
-            // FIXED: Convert meters to miles properly
-            distanceMiles: (step.distance || 0) * 0.000621371,
             type: step.type || 0,
             name: step.name || ''
         }))
