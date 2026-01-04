@@ -1,13 +1,14 @@
 /**
- * MileSaver - FULLSCREEN NAVIGATION EDITION
- * Features: Auto-follow GPS, Fullscreen navigation mode, Turn-by-turn directions
+ * MileSaver - COMPLETE EDITION
+ * Features: Fullscreen nav, Custom cost/mile, Elevation data, Time disclaimers
  */
 
 const CONFIG = {
     API_KEY: 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImEyODcyMTRmYjAzODRiNmVhYmE4MTU3Njc5MTg0Y2NhIiwiaCI6Im11cm11cjY0In0=',
     GOOGLE_API_KEY: 'AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0',
     API_BASE_URL: 'https://api.openrouteservice.org/v2/directions/driving-car',
-    COST_PER_MILE: 0.25,
+    ELEVATION_API_URL: 'https://api.open-elevation.com/api/v1/lookup',
+    DEFAULT_COST_PER_MILE: 0.25,
 };
 
 const state = {
@@ -30,13 +31,14 @@ const state = {
     gpsWatchId: null,
     autocompleteStart: null,
     autocompleteEnd: null,
-    autocompleteEnabled: false,
     googleStartCoords: null,
     googleEndCoords: null,
     currentUserLocation: null,
     isNavigating: false,
-    currentStepIndex: 0,
-    selectedRoute: 'shortest'
+    selectedRoute: 'shortest',
+    routesAnalyzed: 0,
+    startElevation: null,
+    endElevation: null
 };
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -85,6 +87,14 @@ function initializeApp() {
     
     document.getElementById('trips-per-month').addEventListener('input', (e) => {
         document.getElementById('trips-per-month-value').textContent = e.target.value;
+        updateSavingsDisplay();
+    });
+    
+    // Cost per mile slider
+    document.getElementById('cost-per-mile').addEventListener('input', (e) => {
+        document.getElementById('cost-per-mile-value').textContent = parseFloat(e.target.value).toFixed(2);
+        document.getElementById('cost-disclaimer-value').textContent = parseFloat(e.target.value).toFixed(2);
+        updateSavingsDisplay();
     });
     
     // Clear coords on manual input
@@ -95,7 +105,83 @@ function initializeApp() {
         state.googleEndCoords = null;
     });
     
-    console.log('MileSaver FULLSCREEN NAV initialized!');
+    console.log('MileSaver COMPLETE EDITION initialized!');
+}
+
+// ==========================================
+// ELEVATION DATA
+// ==========================================
+
+async function fetchElevation(lat, lon) {
+    try {
+        const url = `${CONFIG.ELEVATION_API_URL}?locations=${lat},${lon}`;
+        const response = await fetch(url);
+        
+        if (!response.ok) throw new Error('Elevation API error');
+        
+        const data = await response.json();
+        if (data.results && data.results.length > 0) {
+            return data.results[0].elevation; // Returns elevation in meters
+        }
+        throw new Error('No elevation data');
+    } catch (err) {
+        console.warn('Elevation fetch failed:', err);
+        return null;
+    }
+}
+
+async function fetchBothElevations(startCoords, endCoords) {
+    try {
+        // Fetch both elevations in parallel
+        const [startElev, endElev] = await Promise.all([
+            fetchElevation(startCoords.lat, startCoords.lon),
+            fetchElevation(endCoords.lat, endCoords.lon)
+        ]);
+        
+        state.startElevation = startElev;
+        state.endElevation = endElev;
+        
+        displayElevation(startElev, endElev);
+    } catch (err) {
+        console.warn('Could not fetch elevation:', err);
+        document.getElementById('elevation-card').classList.add('hidden');
+    }
+}
+
+function displayElevation(startElev, endElev) {
+    const card = document.getElementById('elevation-card');
+    
+    if (startElev === null || endElev === null) {
+        card.classList.add('hidden');
+        return;
+    }
+    
+    // Convert meters to feet
+    const startFeet = Math.round(startElev * 3.28084);
+    const endFeet = Math.round(endElev * 3.28084);
+    const diffFeet = endFeet - startFeet;
+    
+    document.getElementById('start-elevation').textContent = `${startFeet.toLocaleString()} ft`;
+    document.getElementById('end-elevation').textContent = `${endFeet.toLocaleString()} ft`;
+    
+    const diffEl = document.getElementById('elevation-diff');
+    const labelEl = document.getElementById('elevation-label');
+    
+    if (diffFeet > 0) {
+        labelEl.textContent = '📈 Gain:';
+        diffEl.textContent = `+${diffFeet.toLocaleString()} ft`;
+        diffEl.className = 'elevation-value uphill';
+    } else if (diffFeet < 0) {
+        labelEl.textContent = '📉 Drop:';
+        diffEl.textContent = `${diffFeet.toLocaleString()} ft`;
+        diffEl.className = 'elevation-value downhill';
+    } else {
+        labelEl.textContent = 'Change:';
+        diffEl.textContent = '0 ft (flat)';
+        diffEl.className = 'elevation-value';
+    }
+    
+    card.classList.remove('hidden');
 }
 
 // ==========================================
@@ -262,13 +348,10 @@ function startFullscreenNavigation() {
     }
     
     state.isNavigating = true;
-    state.currentStepIndex = 0;
     
-    // Show fullscreen overlay
     document.getElementById('fullscreen-nav').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
     
-    // Initialize fullscreen map if not already done
     if (!state.fullscreenMap) {
         state.fullscreenMap = L.map('fullscreen-map', {
             zoomControl: false,
@@ -280,7 +363,6 @@ function startFullscreenNavigation() {
         }).addTo(state.fullscreenMap);
     }
     
-    // Draw route on fullscreen map
     if (state.fullscreenRouteLayer) {
         state.fullscreenMap.removeLayer(state.fullscreenRouteLayer);
     }
@@ -292,7 +374,6 @@ function startFullscreenNavigation() {
         opacity: 0.9
     }).addTo(state.fullscreenMap);
     
-    // Add destination marker
     L.marker([state.endCoords.lat, state.endCoords.lon], {
         icon: L.divIcon({
             className: 'destination-marker',
@@ -302,19 +383,15 @@ function startFullscreenNavigation() {
         })
     }).addTo(state.fullscreenMap);
     
-    // Update nav info
     document.getElementById('nav-distance-remaining').textContent = `${routeData.distance.toFixed(1)} mi`;
-    document.getElementById('nav-time-remaining').textContent = `${Math.round(routeData.duration)} min`;
+    document.getElementById('nav-time-remaining').textContent = `~${Math.round(routeData.duration)} min`;
     
-    // Show first direction
     if (routeData.instructions && routeData.instructions.length > 0) {
         updateCurrentDirection(routeData.instructions[0]);
     }
     
-    // Start GPS tracking for navigation
     startNavigationGPS();
     
-    // Fit map to route then zoom to start
     state.fullscreenMap.fitBounds(L.latLngBounds(routeCoords), { padding: [50, 50] });
     
     setTimeout(() => {
@@ -329,7 +406,6 @@ function exitFullscreenNavigation() {
     document.getElementById('fullscreen-nav').classList.add('hidden');
     document.body.style.overflow = '';
     
-    // Stop GPS if it was started for navigation
     if (state.gpsWatchId) {
         navigator.geolocation.clearWatch(state.gpsWatchId);
         state.gpsWatchId = null;
@@ -348,7 +424,6 @@ function startNavigationGPS() {
             const { latitude, longitude, accuracy } = position.coords;
             state.currentUserLocation = { lat: latitude, lon: longitude };
             
-            // Update marker on fullscreen map
             updateFullscreenUserLocation(latitude, longitude, accuracy);
             
             // AUTO-CENTER: Always keep map centered on user during navigation
@@ -359,7 +434,6 @@ function startNavigationGPS() {
                 });
             }
             
-            // Also update main map if visible
             updateMainMapUserLocation(latitude, longitude, accuracy);
         },
         (error) => {
@@ -376,7 +450,6 @@ function startNavigationGPS() {
 function updateFullscreenUserLocation(lat, lng, accuracy) {
     if (!state.fullscreenMap) return;
     
-    // Accuracy circle
     if (state.fullscreenAccuracyCircle) {
         state.fullscreenAccuracyCircle.setLatLng([lat, lng]);
         state.fullscreenAccuracyCircle.setRadius(Math.min(accuracy, 100));
@@ -390,7 +463,6 @@ function updateFullscreenUserLocation(lat, lng, accuracy) {
         }).addTo(state.fullscreenMap);
     }
     
-    // User marker
     if (state.fullscreenUserMarker) {
         state.fullscreenUserMarker.setLatLng([lat, lng]);
     } else {
@@ -502,7 +574,10 @@ async function handleSearch() {
         
         addMarkers(start, end);
         
+        // Fetch routes
         const routes = await fetchMultipleRoutes(start, end, true);
+        state.routesAnalyzed = routes.length;
+        
         if (routes.length < 2) routes.push({ ...routes[0] });
         
         const sorted = [...routes].sort((a, b) => a.distance - b.distance);
@@ -519,6 +594,9 @@ async function handleSearch() {
         state.routeComparison = comparison;
         drawRoutes(state.shortestRouteData, state.fastestRouteData);
         displayResults(comparison);
+        
+        // Fetch elevation data in the background
+        fetchBothElevations(start, end);
         
     } catch (error) {
         showError(error.message || 'Failed to find routes');
@@ -646,7 +724,8 @@ function showDirections(routeType) {
         html += `<li class="direction-step"><span class="step-icon">${icon}</span><div class="step-content"><span class="step-instruction">${step.instruction}</span>${dist ? `<span class="step-distance">${dist}</span>` : ''}</div></li>`;
     });
     html += '</ol>';
-    html += `<div class="directions-summary"><strong>Total:</strong> ${routeData.distance.toFixed(2)} mi • ${Math.round(routeData.duration)} min</div>`;
+    html += `<div class="directions-summary"><strong>Total:</strong> ${routeData.distance.toFixed(2)} mi • ~${Math.round(routeData.duration)} min</div>`;
+    html += `<div class="directions-disclaimer">⏱️ Time is estimate without live traffic</div>`;
     
     content.innerHTML = html;
     panel.classList.remove('hidden');
@@ -735,34 +814,46 @@ function decodePolyline(encoded) {
 
 function displayResults(comparison) {
     const timeTolerance = parseFloat(document.getElementById('time-tolerance').value);
-    const tripsPerMonth = parseFloat(document.getElementById('trips-per-month').value);
-    
     const { shortestRoute, fastestRoute, milesSaved, extraTime } = comparison;
     
     document.getElementById('results-section').classList.remove('hidden');
     document.getElementById('shortest-distance').textContent = `${shortestRoute.distance.toFixed(2)} mi`;
-    document.getElementById('shortest-duration').textContent = `${Math.round(shortestRoute.duration)} min`;
+    document.getElementById('shortest-duration').textContent = `~${Math.round(shortestRoute.duration)} min`;
     document.getElementById('fastest-distance').textContent = `${fastestRoute.distance.toFixed(2)} mi`;
-    document.getElementById('fastest-duration').textContent = `${Math.round(fastestRoute.duration)} min`;
+    document.getElementById('fastest-duration').textContent = `~${Math.round(fastestRoute.duration)} min`;
+    
+    // Update routes analyzed text
+    document.getElementById('routes-analyzed').textContent = 
+        `Analyzed ${state.routesAnalyzed} route strategies, showing best 2`;
     
     const card = document.getElementById('recommendation-card');
     if (milesSaved > 0.5) {
         if (extraTime <= timeTolerance) {
             card.className = 'recommendation-card success';
-            card.innerHTML = `<div class="title">✅ Take the Shortest Route!</div><div class="subtitle">Save ${milesSaved.toFixed(2)} mi with ${Math.abs(extraTime).toFixed(0)} extra min</div>`;
+            card.innerHTML = `<div class="title">✅ Take the Shortest Route!</div><div class="subtitle">Save ${milesSaved.toFixed(2)} mi with ~${Math.abs(extraTime).toFixed(0)} extra min</div>`;
         } else {
             card.className = 'recommendation-card warning';
-            card.innerHTML = `<div class="title">⚠️ Trade-off Required</div><div class="subtitle">Shortest saves ${milesSaved.toFixed(2)} mi but adds ${Math.abs(extraTime).toFixed(0)} min</div>`;
+            card.innerHTML = `<div class="title">⚠️ Trade-off Required</div><div class="subtitle">Shortest saves ${milesSaved.toFixed(2)} mi but adds ~${Math.abs(extraTime).toFixed(0)} min</div>`;
         }
     } else {
         card.className = 'recommendation-card warning';
         card.innerHTML = `<div class="title">ℹ️ Routes Are Similar</div><div class="subtitle">Only ${Math.abs(milesSaved).toFixed(2)} mi difference</div>`;
     }
     
-    const monthlyMiles = Math.max(0, milesSaved) * tripsPerMonth;
-    const monthlySavings = monthlyMiles * CONFIG.COST_PER_MILE;
+    updateSavingsDisplay();
+}
+
+function updateSavingsDisplay() {
+    if (!state.routeComparison) return;
     
-    document.getElementById('miles-saved').textContent = `${Math.max(0, milesSaved).toFixed(2)} mi`;
+    const tripsPerMonth = parseFloat(document.getElementById('trips-per-month').value);
+    const costPerMile = parseFloat(document.getElementById('cost-per-mile').value);
+    const milesSaved = Math.max(0, state.routeComparison.milesSaved);
+    
+    const monthlyMiles = milesSaved * tripsPerMonth;
+    const monthlySavings = monthlyMiles * costPerMile;
+    
+    document.getElementById('miles-saved').textContent = `${milesSaved.toFixed(2)} mi`;
     document.getElementById('monthly-miles').textContent = `${monthlyMiles.toFixed(1)} mi`;
     document.getElementById('monthly-savings').textContent = `$${monthlySavings.toFixed(2)}`;
     document.getElementById('annual-savings').textContent = `$${(monthlySavings * 12).toFixed(2)}`;
@@ -794,4 +885,5 @@ function hideError() {
 
 function hideResults() {
     document.getElementById('results-section').classList.add('hidden');
+    document.getElementById('elevation-card').classList.add('hidden');
 }

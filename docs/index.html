@@ -88,11 +88,16 @@
                     <div class="setting-group">
                         <label>Extra time OK: <strong id="time-tolerance-value">30</strong> min</label>
                         <input type="range" id="time-tolerance" min="0" max="120" step="10" value="30">
-                        <small class="hint">How much extra time are you willing to accept to save miles?</small>
+                        <small class="hint">How much extra time to save miles?</small>
                     </div>
                     <div class="setting-group">
                         <label>Trips/month: <strong id="trips-per-month-value">4</strong>x</label>
                         <input type="range" id="trips-per-month" min="1" max="30" step="1" value="4">
+                    </div>
+                    <div class="setting-group">
+                        <label>Cost per mile: $<strong id="cost-per-mile-value">0.25</strong></label>
+                        <input type="range" id="cost-per-mile" min="0.10" max="1.00" step="0.05" value="0.25">
+                        <small class="hint">IRS average is $0.67, typical gas cost ~$0.15-0.30</small>
                     </div>
                 </div>
 
@@ -129,6 +134,28 @@
                         </div>
                     </div>
 
+                    <!-- Time Disclaimer -->
+                    <div class="disclaimer">
+                        ⏱️ Travel times are estimates without live traffic data
+                    </div>
+
+                    <!-- Elevation Info -->
+                    <div id="elevation-card" class="elevation-card hidden">
+                        <div class="elevation-header">🏔️ Elevation</div>
+                        <div class="elevation-row">
+                            <span>Start:</span>
+                            <span id="start-elevation">--</span>
+                        </div>
+                        <div class="elevation-row">
+                            <span>End:</span>
+                            <span id="end-elevation">--</span>
+                        </div>
+                        <div class="elevation-row total">
+                            <span id="elevation-label">Change:</span>
+                            <span id="elevation-diff" class="elevation-value">--</span>
+                        </div>
+                    </div>
+
                     <!-- START NAVIGATION BUTTON -->
                     <button id="start-nav-btn" class="start-nav-btn">
                         🚗 Start Navigation
@@ -153,6 +180,14 @@
                             <span>Annual:</span>
                             <span id="annual-savings" class="savings-value-large">-</span>
                         </div>
+                        <div class="savings-disclaimer">
+                            💡 Based on $<span id="cost-disclaimer-value">0.25</span>/mile. Adjust in preferences above.
+                        </div>
+                    </div>
+
+                    <!-- Routes Analyzed Info -->
+                    <div class="routes-analyzed" id="routes-analyzed">
+                        Analyzed 5 route strategies, showing best 2
                     </div>
 
                     <!-- TURN-BY-TURN DIRECTIONS PANEL -->
