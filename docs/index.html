@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
     <meta name="description" content="MileSaver - Find shortest routes with turn-by-turn directions">
     <meta name="theme-color" content="#2563eb">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -14,7 +14,7 @@
     
     <title>MileSaver - Save Miles, Save Money</title>
     
-    <!-- Google Maps API with Places Library -->
+    <!-- Google Maps API -->
     <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0&libraries=places&callback=Function.prototype"></script>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -23,7 +23,7 @@
 <body>
     <div id="app">
         <!-- Header -->
-        <header class="header">
+        <header class="header" id="main-header">
             <div class="header-content">
                 <h1>💰 MileSaver</h1>
                 <p class="tagline">Find Shortest Routes, Save Money</p>
@@ -33,7 +33,7 @@
         <!-- Main Layout -->
         <main class="main-layout">
             <!-- LEFT SIDEBAR -->
-            <aside class="sidebar">
+            <aside class="sidebar" id="sidebar">
                 <!-- Input Card -->
                 <div class="card">
                     <h2 class="card-title">📍 Route Details</h2>
@@ -96,21 +96,6 @@
                     </div>
                 </div>
 
-                <!-- GPS Tracking Toggle -->
-                <div class="card">
-                    <div class="gps-toggle">
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="gps-tracking">
-                            <span class="toggle-slider"></span>
-                        </label>
-                        <div class="toggle-info">
-                            <div class="toggle-label">📍 Live Navigation Mode</div>
-                            <small>Map follows your position</small>
-                        </div>
-                    </div>
-                    <div id="gps-status" class="gps-status hidden"></div>
-                </div>
-
                 <!-- Search Button -->
                 <button id="search-btn" class="search-btn">
                     <span class="icon">🔍</span> Find Best Route
@@ -143,6 +128,11 @@
                             <small class="route-hint">Click for directions</small>
                         </div>
                     </div>
+
+                    <!-- START NAVIGATION BUTTON -->
+                    <button id="start-nav-btn" class="start-nav-btn">
+                        🚗 Start Navigation
+                    </button>
 
                     <!-- Savings -->
                     <div class="savings-card-compact">
@@ -177,14 +167,14 @@
             </aside>
 
             <!-- RIGHT: LARGE MAP -->
-            <section class="map-section-large">
+            <section class="map-section-large" id="map-section">
                 <div id="map" class="map-container-large"></div>
                 <div id="loading-spinner" class="loading-spinner hidden">
                     <div class="spinner"></div>
                     <p>Finding routes...</p>
                 </div>
                 
-                <!-- Re-center button (shows when GPS is active) -->
+                <!-- Re-center button -->
                 <button id="recenter-btn" class="recenter-btn hidden" title="Center map on my location">
                     🎯
                 </button>
@@ -206,6 +196,32 @@
                 </div>
             </section>
         </main>
+    </div>
+
+    <!-- FULLSCREEN NAVIGATION OVERLAY -->
+    <div id="fullscreen-nav" class="fullscreen-nav hidden">
+        <div id="fullscreen-map" class="fullscreen-map"></div>
+        
+        <!-- Navigation Header -->
+        <div class="nav-header">
+            <button id="exit-nav-btn" class="exit-nav-btn">✕ Exit</button>
+            <div class="nav-status">
+                <span id="nav-distance-remaining">--</span>
+                <span id="nav-time-remaining">--</span>
+            </div>
+        </div>
+        
+        <!-- Current Direction Card -->
+        <div class="current-direction-card" id="current-direction-card">
+            <div class="direction-icon" id="nav-direction-icon">⬆️</div>
+            <div class="direction-info">
+                <div class="direction-text" id="nav-direction-text">Start navigation</div>
+                <div class="direction-distance" id="nav-direction-distance">--</div>
+            </div>
+        </div>
+        
+        <!-- Re-center button in fullscreen -->
+        <button id="fullscreen-recenter-btn" class="fullscreen-recenter-btn">🎯</button>
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
