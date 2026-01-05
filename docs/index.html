@@ -17,7 +17,14 @@
     <!-- Google Maps API -->
     <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0&libraries=places&callback=Function.prototype"></script>
     
+    <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <!-- Leaflet Rotate CSS -->
+    <style>
+        .leaflet-container { touch-action: none; }
+    </style>
+    
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -88,7 +95,6 @@
                     <div class="setting-group">
                         <label>Extra time OK: <strong id="time-tolerance-value">30</strong> min</label>
                         <input type="range" id="time-tolerance" min="0" max="120" step="10" value="30">
-                        <small class="hint">How much extra time to save miles?</small>
                     </div>
                     <div class="setting-group">
                         <label>Trips/month: <strong id="trips-per-month-value">4</strong>x</label>
@@ -97,7 +103,11 @@
                     <div class="setting-group">
                         <label>Cost per mile: $<strong id="cost-per-mile-value">0.25</strong></label>
                         <input type="range" id="cost-per-mile" min="0.10" max="1.00" step="0.05" value="0.25">
-                        <small class="hint">IRS average is $0.67, typical gas cost ~$0.15-0.30</small>
+                    </div>
+                    <div class="setting-group">
+                        <label>Show shortest only if saves: <strong id="min-savings-value">0.5</strong>+ mi</label>
+                        <input type="range" id="min-savings" min="0" max="5" step="0.5" value="0.5">
+                        <small class="hint">Set to 0 to always show shortest route</small>
                     </div>
                 </div>
 
@@ -181,7 +191,7 @@
                             <span id="annual-savings" class="savings-value-large">-</span>
                         </div>
                         <div class="savings-disclaimer">
-                            💡 Based on $<span id="cost-disclaimer-value">0.25</span>/mile. Adjust in preferences above.
+                            💡 Based on $<span id="cost-disclaimer-value">0.25</span>/mile
                         </div>
                     </div>
 
@@ -246,17 +256,41 @@
             </div>
         </div>
         
+        <!-- Speed Limit Display -->
+        <div class="speed-limit-display" id="speed-limit-display">
+            <div class="speed-limit-sign" id="speed-limit-sign">
+                <span id="speed-limit-value">--</span>
+            </div>
+            <div class="current-speed" id="current-speed">-- mph</div>
+        </div>
+        
         <!-- Current Direction Card -->
         <div class="current-direction-card" id="current-direction-card">
             <div class="direction-icon" id="nav-direction-icon">⬆️</div>
             <div class="direction-info">
                 <div class="direction-text" id="nav-direction-text">Start navigation</div>
                 <div class="direction-distance" id="nav-direction-distance">--</div>
+                <div class="direction-alerts" id="direction-alerts"></div>
             </div>
         </div>
         
-        <!-- Re-center button in fullscreen -->
-        <button id="fullscreen-recenter-btn" class="fullscreen-recenter-btn">🎯</button>
+        <!-- Map Controls -->
+        <div class="nav-controls">
+            <button id="fullscreen-recenter-btn" class="fullscreen-recenter-btn" title="Re-center on my location">🎯</button>
+            <button id="rotate-north-btn" class="nav-control-btn" title="Reset to North">🧭</button>
+            <button id="toggle-follow-btn" class="nav-control-btn active" title="Toggle follow mode">👁️</button>
+        </div>
+        
+        <!-- Rerouting Notification -->
+        <div id="rerouting-toast" class="rerouting-toast hidden">
+            <div class="rerouting-spinner"></div>
+            <span>Rerouting...</span>
+        </div>
+        
+        <!-- Off Route Warning -->
+        <div id="off-route-warning" class="off-route-warning hidden">
+            ⚠️ You are off route
+        </div>
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>

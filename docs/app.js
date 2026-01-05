@@ -1,6 +1,6 @@
 /**
- * MileSaver - COMPLETE EDITION
- * Features: Fullscreen nav, Custom cost/mile, Elevation data, Time disclaimers
+ * MileSaver - PROFESSIONAL NAVIGATION EDITION
+ * Features: Wake lock, Map rotation, Rerouting, Speed limits, Stop signs
  */
 
 const CONFIG = {
@@ -8,7 +8,9 @@ const CONFIG = {
     GOOGLE_API_KEY: 'AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0',
     API_BASE_URL: 'https://api.openrouteservice.org/v2/directions/driving-car',
     ELEVATION_API_URL: 'https://api.open-elevation.com/api/v1/lookup',
-    DEFAULT_COST_PER_MILE: 0.25,
+    OVERPASS_API_URL: 'https://overpass-api.de/api/interpreter',
+    OFF_ROUTE_THRESHOLD: 50, // meters before rerouting
+    REROUTE_COOLDOWN: 10000, // 10 seconds between reroutes
 };
 
 const state = {
@@ -23,23 +25,39 @@ const state = {
     fullscreenRouteLayer: null,
     shortestRouteLayer: null,
     fastestRouteLayer: null,
+    speedLimitMarkers: [],
+    stopSignMarkers: [],
     startCoords: null,
     endCoords: null,
     routeComparison: null,
     shortestRouteData: null,
     fastestRouteData: null,
+    activeRouteCoords: [],
     gpsWatchId: null,
-    autocompleteStart: null,
-    autocompleteEnd: null,
     googleStartCoords: null,
     googleEndCoords: null,
     currentUserLocation: null,
+    currentSpeed: 0,
+    currentHeading: 0,
     isNavigating: false,
+    isFollowMode: true,
     selectedRoute: 'shortest',
     routesAnalyzed: 0,
     startElevation: null,
-    endElevation: null
+    endElevation: null,
+    wakeLock: null,
+    mapRotation: 0,
+    lastRerouteTime: 0,
+    isRerouting: false,
+    speedLimits: [],
+    stopSigns: [],
+    currentSpeedLimit: null,
+    currentStepIndex: 0
 };
+
+// ==========================================
+// INITIALIZATION
+// ==========================================
 
 document.addEventListener('DOMContentLoaded', () => {
     initializeApp();
@@ -65,6 +83,8 @@ function initializeApp() {
     document.getElementById('start-nav-btn').addEventListener('click', startFullscreenNavigation);
     document.getElementById('exit-nav-btn').addEventListener('click', exitFullscreenNavigation);
     document.getElementById('fullscreen-recenter-btn').addEventListener('click', recenterFullscreenMap);
+    document.getElementById('rotate-north-btn').addEventListener('click', resetMapRotation);
+    document.getElementById('toggle-follow-btn').addEventListener('click', toggleFollowMode);
     
     // Route card clicks
     document.querySelectorAll('.route-card-compact').forEach(card => {
@@ -81,21 +101,7 @@ function initializeApp() {
     });
     
     // Sliders
-    document.getElementById('time-tolerance').addEventListener('input', (e) => {
-        document.getElementById('time-tolerance-value').textContent = e.target.value;
-    });
-    
-    document.getElementById('trips-per-month').addEventListener('input', (e) => {
-        document.getElementById('trips-per-month-value').textContent = e.target.value;
-        updateSavingsDisplay();
-    });
-    
-    // Cost per mile slider
-    document.getElementById('cost-per-mile').addEventListener('input', (e) => {
-        document.getElementById('cost-per-mile-value').textContent = parseFloat(e.target.value).toFixed(2);
-        document.getElementById('cost-disclaimer-value').textContent = parseFloat(e.target.value).toFixed(2);
-        updateSavingsDisplay();
-    });
+    setupSliders();
     
     // Clear coords on manual input
     document.getElementById('start-location').addEventListener('input', () => {
@@ -105,83 +111,829 @@ function initializeApp() {
         state.googleEndCoords = null;
     });
     
-    console.log('MileSaver COMPLETE EDITION initialized!');
+    console.log('MileSaver PRO initialized!');
+}
+
+function setupSliders() {
+    document.getElementById('time-tolerance').addEventListener('input', (e) => {
+        document.getElementById('time-tolerance-value').textContent = e.target.value;
+    });
+    
+    document.getElementById('trips-per-month').addEventListener('input', (e) => {
+        document.getElementById('trips-per-month-value').textContent = e.target.value;
+        updateSavingsDisplay();
+    });
+    
+    document.getElementById('cost-per-mile').addEventListener('input', (e) => {
+        document.getElementById('cost-per-mile-value').textContent = parseFloat(e.target.value).toFixed(2);
+        document.getElementById('cost-disclaimer-value').textContent = parseFloat(e.target.value).toFixed(2);
+        updateSavingsDisplay();
+    });
+    
+    document.getElementById('min-savings').addEventListener('input', (e) => {
+        document.getElementById('min-savings-value').textContent = parseFloat(e.target.value).toFixed(1);
+    });
 }
 
 // ==========================================
-// ELEVATION DATA
+// SCREEN WAKE LOCK
 // ==========================================
 
-async function fetchElevation(lat, lon) {
+async function requestWakeLock() {
+    if (!('wakeLock' in navigator)) {
+        console.warn('Wake Lock API not supported');
+        return false;
+    }
+    
     try {
-        const url = `${CONFIG.ELEVATION_API_URL}?locations=${lat},${lon}`;
-        const response = await fetch(url);
+        state.wakeLock = await navigator.wakeLock.request('screen');
         
-        if (!response.ok) throw new Error('Elevation API error');
+        state.wakeLock.addEventListener('release', () => {
+            console.log('Wake lock released');
+        });
+        
+        // Re-acquire wake lock if page becomes visible again
+        document.addEventListener('visibilitychange', async () => {
+            if (state.isNavigating && document.visibilityState === 'visible') {
+                await requestWakeLock();
+            }
+        });
+        
+        console.log('✓ Screen wake lock acquired');
+        return true;
+    } catch (err) {
+        console.error('Wake lock error:', err);
+        return false;
+    }
+}
+
+async function releaseWakeLock() {
+    if (state.wakeLock) {
+        try {
+            await state.wakeLock.release();
+            state.wakeLock = null;
+            console.log('Wake lock released');
+        } catch (err) {
+            console.error('Error releasing wake lock:', err);
+        }
+    }
+}
+
+// ==========================================
+// SPEED LIMITS & STOP SIGNS (Overpass API)
+// ==========================================
+
+async function fetchTrafficData(routeCoords) {
+    if (!routeCoords || routeCoords.length < 2) return;
+    
+    try {
+        // Calculate bounding box with padding
+        const bounds = calculateBounds(routeCoords);
+        const padding = 0.005; // ~500m padding
+        
+        const query = `
+            [out:json][timeout:25];
+            (
+                way["maxspeed"](${bounds.south - padding},${bounds.west - padding},${bounds.north + padding},${bounds.east + padding});
+                node["highway"="stop"](${bounds.south - padding},${bounds.west - padding},${bounds.north + padding},${bounds.east + padding});
+            );
+            out body;
+            >;
+            out skel qt;
+        `;
+        
+        const response = await fetch(CONFIG.OVERPASS_API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'data=' + encodeURIComponent(query)
+        });
+        
+        if (!response.ok) throw new Error('Overpass API error');
         
         const data = await response.json();
-        if (data.results && data.results.length > 0) {
-            return data.results[0].elevation; // Returns elevation in meters
-        }
-        throw new Error('No elevation data');
+        processTrafficData(data);
+        
     } catch (err) {
-        console.warn('Elevation fetch failed:', err);
-        return null;
+        console.warn('Could not fetch traffic data:', err);
     }
 }
 
-async function fetchBothElevations(startCoords, endCoords) {
-    try {
-        // Fetch both elevations in parallel
-        const [startElev, endElev] = await Promise.all([
-            fetchElevation(startCoords.lat, startCoords.lon),
-            fetchElevation(endCoords.lat, endCoords.lon)
-        ]);
-        
-        state.startElevation = startElev;
-        state.endElevation = endElev;
-        
-        displayElevation(startElev, endElev);
-    } catch (err) {
-        console.warn('Could not fetch elevation:', err);
-        document.getElementById('elevation-card').classList.add('hidden');
-    }
-}
-
-function displayElevation(startElev, endElev) {
-    const card = document.getElementById('elevation-card');
+function processTrafficData(data) {
+    if (!data.elements) return;
     
-    if (startElev === null || endElev === null) {
-        card.classList.add('hidden');
+    const nodes = {};
+    const speedLimits = [];
+    const stopSigns = [];
+    
+    // First pass: collect all nodes
+    data.elements.forEach(el => {
+        if (el.type === 'node') {
+            nodes[el.id] = { lat: el.lat, lon: el.lon, tags: el.tags };
+            
+            // Check if it's a stop sign
+            if (el.tags && el.tags.highway === 'stop') {
+                stopSigns.push({
+                    lat: el.lat,
+                    lon: el.lon,
+                    direction: el.tags.direction || 'all'
+                });
+            }
+        }
+    });
+    
+    // Second pass: process ways with speed limits
+    data.elements.forEach(el => {
+        if (el.type === 'way' && el.tags && el.tags.maxspeed) {
+            const speedValue = parseSpeedLimit(el.tags.maxspeed);
+            if (speedValue && el.nodes && el.nodes.length > 0) {
+                // Get the midpoint of the way for marker placement
+                const midIndex = Math.floor(el.nodes.length / 2);
+                const midNodeId = el.nodes[midIndex];
+                const midNode = nodes[midNodeId];
+                
+                if (midNode) {
+                    speedLimits.push({
+                        lat: midNode.lat,
+                        lon: midNode.lon,
+                        speed: speedValue,
+                        wayNodes: el.nodes.map(nid => nodes[nid]).filter(n => n)
+                    });
+                }
+            }
+        }
+    });
+    
+    state.speedLimits = speedLimits;
+    state.stopSigns = stopSigns;
+    
+    console.log(`Found ${speedLimits.length} speed limits, ${stopSigns.length} stop signs`);
+}
+
+function parseSpeedLimit(maxspeed) {
+    if (!maxspeed) return null;
+    
+    // Handle common formats
+    const numMatch = maxspeed.match(/(\d+)/);
+    if (!numMatch) return null;
+    
+    let speed = parseInt(numMatch[1]);
+    
+    // Convert km/h to mph if needed
+    if (maxspeed.includes('km/h') || (!maxspeed.includes('mph') && speed > 80)) {
+        speed = Math.round(speed * 0.621371);
+    }
+    
+    return speed;
+}
+
+function calculateBounds(coords) {
+    let north = -90, south = 90, east = -180, west = 180;
+    
+    coords.forEach(([lat, lon]) => {
+        if (lat > north) north = lat;
+        if (lat < south) south = lat;
+        if (lon > east) east = lon;
+        if (lon < west) west = lon;
+    });
+    
+    return { north, south, east, west };
+}
+
+function updateCurrentSpeedLimit(userLat, userLon) {
+    if (!state.speedLimits.length) return;
+    
+    let closestLimit = null;
+    let closestDist = Infinity;
+    
+    state.speedLimits.forEach(limit => {
+        // Check distance to the way's nodes
+        if (limit.wayNodes) {
+            limit.wayNodes.forEach(node => {
+                if (node) {
+                    const dist = getDistanceMeters(userLat, userLon, node.lat, node.lon);
+                    if (dist < closestDist && dist < 100) { // Within 100m
+                        closestDist = dist;
+                        closestLimit = limit.speed;
+                    }
+                }
+            });
+        }
+    });
+    
+    if (closestLimit !== state.currentSpeedLimit) {
+        state.currentSpeedLimit = closestLimit;
+        updateSpeedLimitDisplay(closestLimit);
+    }
+}
+
+function updateSpeedLimitDisplay(limit) {
+    const signEl = document.getElementById('speed-limit-sign');
+    const valueEl = document.getElementById('speed-limit-value');
+    
+    if (limit) {
+        valueEl.textContent = limit;
+        signEl.classList.add('active');
+    } else {
+        valueEl.textContent = '--';
+        signEl.classList.remove('active');
+    }
+}
+
+function checkUpcomingStopSigns(userLat, userLon) {
+    if (!state.stopSigns.length) return [];
+    
+    const upcoming = [];
+    
+    state.stopSigns.forEach(sign => {
+        const dist = getDistanceMeters(userLat, userLon, sign.lat, sign.lon);
+        if (dist < 500 && dist > 10) { // Between 10m and 500m ahead
+            upcoming.push({
+                ...sign,
+                distance: dist
+            });
+        }
+    });
+    
+    // Sort by distance
+    upcoming.sort((a, b) => a.distance - b.distance);
+    
+    return upcoming.slice(0, 3); // Return up to 3 closest
+}
+
+function displayTrafficMarkersOnMap(map) {
+    // Clear existing markers
+    state.speedLimitMarkers.forEach(m => map.removeLayer(m));
+    state.stopSignMarkers.forEach(m => map.removeLayer(m));
+    state.speedLimitMarkers = [];
+    state.stopSignMarkers = [];
+    
+    // Add speed limit markers (show fewer to avoid clutter)
+    const shownSpeedLimits = state.speedLimits.filter((_, i) => i % 3 === 0);
+    shownSpeedLimits.forEach(limit => {
+        const marker = L.marker([limit.lat, limit.lon], {
+            icon: L.divIcon({
+                className: 'speed-limit-marker',
+                html: `<div class="speed-marker-icon">${limit.speed}</div>`,
+                iconSize: [30, 30],
+                iconAnchor: [15, 15]
+            })
+        }).addTo(map);
+        state.speedLimitMarkers.push(marker);
+    });
+    
+    // Add stop sign markers
+    state.stopSigns.forEach(sign => {
+        const marker = L.marker([sign.lat, sign.lon], {
+            icon: L.divIcon({
+                className: 'stop-sign-marker',
+                html: `<div class="stop-marker-icon">🛑</div>`,
+                iconSize: [24, 24],
+                iconAnchor: [12, 12]
+            })
+        }).addTo(map);
+        state.stopSignMarkers.push(marker);
+    });
+}
+
+// ==========================================
+// MAP ROTATION
+// ==========================================
+
+function initializeMapRotation(map) {
+    let initialAngle = 0;
+    let initialRotation = 0;
+    
+    const mapContainer = map.getContainer();
+    
+    // Touch rotation handler
+    mapContainer.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 2) {
+            initialAngle = getTouchAngle(e.touches);
+            initialRotation = state.mapRotation;
+            
+            // Disable follow mode when user interacts
+            if (state.isFollowMode) {
+                setFollowMode(false);
+            }
+        }
+    }, { passive: true });
+    
+    mapContainer.addEventListener('touchmove', (e) => {
+        if (e.touches.length === 2) {
+            const currentAngle = getTouchAngle(e.touches);
+            const angleDiff = currentAngle - initialAngle;
+            const newRotation = initialRotation + angleDiff;
+            
+            rotateMap(map, newRotation);
+        }
+    }, { passive: true });
+    
+    // Disable follow mode on any touch/drag
+    mapContainer.addEventListener('mousedown', () => {
+        if (state.isFollowMode && state.isNavigating) {
+            setFollowMode(false);
+        }
+    });
+    
+    mapContainer.addEventListener('touchstart', () => {
+        if (state.isFollowMode && state.isNavigating) {
+            setFollowMode(false);
+        }
+    }, { passive: true });
+}
+
+function getTouchAngle(touches) {
+    const dx = touches[1].clientX - touches[0].clientX;
+    const dy = touches[1].clientY - touches[0].clientY;
+    return Math.atan2(dy, dx) * (180 / Math.PI);
+}
+
+function rotateMap(map, angle) {
+    state.mapRotation = angle;
+    const container = map.getContainer();
+    container.style.transform = `rotate(${angle}deg)`;
+    
+    // Counter-rotate markers to keep them upright
+    document.querySelectorAll('.leaflet-marker-icon').forEach(marker => {
+        marker.style.transform = `rotate(${-angle}deg)`;
+    });
+}
+
+function resetMapRotation() {
+    if (state.fullscreenMap) {
+        rotateMap(state.fullscreenMap, 0);
+        state.mapRotation = 0;
+    }
+}
+
+function setFollowMode(enabled) {
+    state.isFollowMode = enabled;
+    const btn = document.getElementById('toggle-follow-btn');
+    
+    if (enabled) {
+        btn.classList.add('active');
+        btn.textContent = '👁️';
+        // Immediately recenter
+        if (state.currentUserLocation && state.fullscreenMap) {
+            state.fullscreenMap.setView(
+                [state.currentUserLocation.lat, state.currentUserLocation.lon],
+                state.fullscreenMap.getZoom(),
+                { animate: true }
+            );
+        }
+    } else {
+        btn.classList.remove('active');
+        btn.textContent = '👁️‍🗨️';
+    }
+}
+
+function toggleFollowMode() {
+    setFollowMode(!state.isFollowMode);
+}
+
+// ==========================================
+// REROUTING
+// ==========================================
+
+function checkOffRoute(userLat, userLon) {
+    if (!state.activeRouteCoords || state.activeRouteCoords.length < 2) return false;
+    if (state.isRerouting) return false;
+    
+    // Find minimum distance to route
+    let minDist = Infinity;
+    
+    for (let i = 0; i < state.activeRouteCoords.length - 1; i++) {
+        const [lat1, lon1] = state.activeRouteCoords[i];
+        const [lat2, lon2] = state.activeRouteCoords[i + 1];
+        
+        const dist = pointToSegmentDistance(userLat, userLon, lat1, lon1, lat2, lon2);
+        if (dist < minDist) minDist = dist;
+    }
+    
+    return minDist > CONFIG.OFF_ROUTE_THRESHOLD;
+}
+
+function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+    // Convert to meters approximately
+    const toMeters = 111320; // degrees to meters at equator
+    
+    px *= toMeters; py *= toMeters * Math.cos(px / toMeters * Math.PI / 180);
+    x1 *= toMeters; y1 *= toMeters * Math.cos(x1 / toMeters * Math.PI / 180);
+    x2 *= toMeters; y2 *= toMeters * Math.cos(x2 / toMeters * Math.PI / 180);
+    
+    const A = px - x1;
+    const B = py - y1;
+    const C = x2 - x1;
+    const D = y2 - y1;
+    
+    const dot = A * C + B * D;
+    const lenSq = C * C + D * D;
+    let param = -1;
+    
+    if (lenSq !== 0) param = dot / lenSq;
+    
+    let xx, yy;
+    
+    if (param < 0) {
+        xx = x1;
+        yy = y1;
+    } else if (param > 1) {
+        xx = x2;
+        yy = y2;
+    } else {
+        xx = x1 + param * C;
+        yy = y1 + param * D;
+    }
+    
+    const dx = px - xx;
+    const dy = py - yy;
+    
+    return Math.sqrt(dx * dx + dy * dy);
+}
+
+function getDistanceMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371000; // Earth's radius in meters
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+}
+
+async function performReroute() {
+    const now = Date.now();
+    if (now - state.lastRerouteTime < CONFIG.REROUTE_COOLDOWN) return;
+    if (state.isRerouting) return;
+    if (!state.currentUserLocation || !state.endCoords) return;
+    
+    state.isRerouting = true;
+    state.lastRerouteTime = now;
+    
+    // Show rerouting UI
+    document.getElementById('rerouting-toast').classList.remove('hidden');
+    document.getElementById('off-route-warning').classList.add('hidden');
+    
+    try {
+        const newRoute = await fetchRouteWithStrategy(
+            state.currentUserLocation,
+            state.endCoords,
+            state.selectedRoute === 'shortest' ? 'shortest' : 'fastest',
+            [],
+            true
+        );
+        
+        // Update route on map
+        if (state.fullscreenRouteLayer && state.fullscreenMap) {
+            state.fullscreenMap.removeLayer(state.fullscreenRouteLayer);
+        }
+        
+        const routeCoords = decodePolyline(newRoute.geometry);
+        state.activeRouteCoords = routeCoords;
+        
+        state.fullscreenRouteLayer = L.polyline(routeCoords, {
+            color: '#2563eb',
+            weight: 8,
+            opacity: 0.9
+        }).addTo(state.fullscreenMap);
+        
+        // Update route data
+        if (state.selectedRoute === 'shortest') {
+            state.shortestRouteData = newRoute;
+        } else {
+            state.fastestRouteData = newRoute;
+        }
+        
+        // Update navigation info
+        document.getElementById('nav-distance-remaining').textContent = `${newRoute.distance.toFixed(1)} mi`;
+        document.getElementById('nav-time-remaining').textContent = `~${Math.round(newRoute.duration)} min`;
+        
+        // Update first instruction
+        if (newRoute.instructions && newRoute.instructions.length > 0) {
+            state.currentStepIndex = 0;
+            updateCurrentDirection(newRoute.instructions[0]);
+        }
+        
+        // Fetch new traffic data for new route
+        fetchTrafficData(routeCoords);
+        
+        console.log('✓ Rerouted successfully');
+        
+    } catch (err) {
+        console.error('Reroute failed:', err);
+    } finally {
+        state.isRerouting = false;
+        document.getElementById('rerouting-toast').classList.add('hidden');
+    }
+}
+
+function showOffRouteWarning() {
+    document.getElementById('off-route-warning').classList.remove('hidden');
+}
+
+function hideOffRouteWarning() {
+    document.getElementById('off-route-warning').classList.add('hidden');
+}
+
+// ==========================================
+// FULLSCREEN NAVIGATION MODE
+// ==========================================
+
+async function startFullscreenNavigation() {
+    const routeData = state.selectedRoute === 'shortest' ? state.shortestRouteData : state.fastestRouteData;
+    if (!routeData) {
+        showError('No route selected');
         return;
     }
     
-    // Convert meters to feet
-    const startFeet = Math.round(startElev * 3.28084);
-    const endFeet = Math.round(endElev * 3.28084);
-    const diffFeet = endFeet - startFeet;
+    state.isNavigating = true;
+    state.isFollowMode = true;
+    state.currentStepIndex = 0;
     
-    document.getElementById('start-elevation').textContent = `${startFeet.toLocaleString()} ft`;
-    document.getElementById('end-elevation').textContent = `${endFeet.toLocaleString()} ft`;
+    // Request wake lock to keep screen on
+    await requestWakeLock();
     
-    const diffEl = document.getElementById('elevation-diff');
-    const labelEl = document.getElementById('elevation-label');
+    // Show fullscreen overlay
+    document.getElementById('fullscreen-nav').classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
     
-    if (diffFeet > 0) {
-        labelEl.textContent = '📈 Gain:';
-        diffEl.textContent = `+${diffFeet.toLocaleString()} ft`;
-        diffEl.className = 'elevation-value uphill';
-    } else if (diffFeet < 0) {
-        labelEl.textContent = '📉 Drop:';
-        diffEl.textContent = `${diffFeet.toLocaleString()} ft`;
-        diffEl.className = 'elevation-value downhill';
-    } else {
-        labelEl.textContent = 'Change:';
-        diffEl.textContent = '0 ft (flat)';
-        diffEl.className = 'elevation-value';
+    // Initialize fullscreen map
+    if (!state.fullscreenMap) {
+        state.fullscreenMap = L.map('fullscreen-map', {
+            zoomControl: false,
+            attributionControl: false,
+            rotate: true,
+            touchRotate: true
+        }).setView([state.startCoords.lat, state.startCoords.lon], 17);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19
+        }).addTo(state.fullscreenMap);
+        
+        // Initialize rotation handling
+        initializeMapRotation(state.fullscreenMap);
     }
     
-    card.classList.remove('hidden');
+    // Clear previous route
+    if (state.fullscreenRouteLayer) {
+        state.fullscreenMap.removeLayer(state.fullscreenRouteLayer);
+    }
+    
+    // Draw route
+    const routeCoords = decodePolyline(routeData.geometry);
+    state.activeRouteCoords = routeCoords;
+    
+    state.fullscreenRouteLayer = L.polyline(routeCoords, {
+        color: '#2563eb',
+        weight: 8,
+        opacity: 0.9
+    }).addTo(state.fullscreenMap);
+    
+    // Add destination marker
+    L.marker([state.endCoords.lat, state.endCoords.lon], {
+        icon: L.divIcon({
+            className: 'destination-marker',
+            html: '<div class="dest-icon">🏁</div>',
+            iconSize: [40, 40],
+            iconAnchor: [20, 20]
+        })
+    }).addTo(state.fullscreenMap);
+    
+    // Update nav info
+    document.getElementById('nav-distance-remaining').textContent = `${routeData.distance.toFixed(1)} mi`;
+    document.getElementById('nav-time-remaining').textContent = `~${Math.round(routeData.duration)} min`;
+    
+    // Show first direction
+    if (routeData.instructions && routeData.instructions.length > 0) {
+        updateCurrentDirection(routeData.instructions[0]);
+    }
+    
+    // Fetch traffic data (speed limits, stop signs)
+    fetchTrafficData(routeCoords);
+    
+    // Start GPS tracking
+    startNavigationGPS();
+    
+    // Fit map to route then zoom to start
+    state.fullscreenMap.fitBounds(L.latLngBounds(routeCoords), { padding: [50, 50] });
+    
+    setTimeout(() => {
+        if (state.currentUserLocation) {
+            state.fullscreenMap.setView([state.currentUserLocation.lat, state.currentUserLocation.lon], 17);
+        }
+    }, 1000);
+    
+    // Set follow mode button active
+    document.getElementById('toggle-follow-btn').classList.add('active');
+}
+
+async function exitFullscreenNavigation() {
+    state.isNavigating = false;
+    state.isFollowMode = false;
+    
+    // Release wake lock
+    await releaseWakeLock();
+    
+    // Hide fullscreen overlay
+    document.getElementById('fullscreen-nav').classList.add('hidden');
+    document.body.style.overflow = '';
+    
+    // Stop GPS tracking
+    if (state.gpsWatchId) {
+        navigator.geolocation.clearWatch(state.gpsWatchId);
+        state.gpsWatchId = null;
+    }
+    
+    // Clear traffic markers
+    state.speedLimitMarkers.forEach(m => {
+        if (state.fullscreenMap) state.fullscreenMap.removeLayer(m);
+    });
+    state.stopSignMarkers.forEach(m => {
+        if (state.fullscreenMap) state.fullscreenMap.removeLayer(m);
+    });
+    state.speedLimitMarkers = [];
+    state.stopSignMarkers = [];
+    
+    // Reset rotation
+    resetMapRotation();
+    
+    // Hide warnings
+    hideOffRouteWarning();
+    document.getElementById('rerouting-toast').classList.add('hidden');
+}
+
+function startNavigationGPS() {
+    if (!navigator.geolocation) return;
+    
+    if (state.gpsWatchId) {
+        navigator.geolocation.clearWatch(state.gpsWatchId);
+    }
+    
+    state.gpsWatchId = navigator.geolocation.watchPosition(
+        (position) => {
+            const { latitude, longitude, accuracy, speed, heading } = position.coords;
+            state.currentUserLocation = { lat: latitude, lon: longitude };
+            state.currentSpeed = speed ? Math.round(speed * 2.23694) : 0; // m/s to mph
+            state.currentHeading = heading || 0;
+            
+            // Update current speed display
+            document.getElementById('current-speed').textContent = `${state.currentSpeed} mph`;
+            
+            // Update speed limit based on location
+            updateCurrentSpeedLimit(latitude, longitude);
+            
+            // Check for upcoming stop signs
+            const upcomingStops = checkUpcomingStopSigns(latitude, longitude);
+            updateDirectionAlerts(upcomingStops);
+            
+            // Update marker position
+            updateFullscreenUserLocation(latitude, longitude, accuracy);
+            
+            // Auto-center if follow mode is on
+            if (state.isFollowMode && state.fullscreenMap) {
+                state.fullscreenMap.setView([latitude, longitude], state.fullscreenMap.getZoom(), {
+                    animate: true,
+                    duration: 0.3
+                });
+            }
+            
+            // Check if off route
+            if (checkOffRoute(latitude, longitude)) {
+                showOffRouteWarning();
+                performReroute();
+            } else {
+                hideOffRouteWarning();
+            }
+            
+            // Update main map too
+            updateMainMapUserLocation(latitude, longitude, accuracy);
+        },
+        (error) => {
+            console.error('GPS error:', error);
+        },
+        {
+            enableHighAccuracy: true,
+            maximumAge: 1000,
+            timeout: 10000
+        }
+    );
+}
+
+function updateDirectionAlerts(upcomingStops) {
+    const alertsEl = document.getElementById('direction-alerts');
+    
+    if (upcomingStops.length > 0) {
+        const nearest = upcomingStops[0];
+        const distText = nearest.distance < 100 
+            ? `${Math.round(nearest.distance)}m` 
+            : `${(nearest.distance / 1000).toFixed(1)}km`;
+        alertsEl.innerHTML = `<span class="stop-alert">🛑 Stop sign in ${distText}</span>`;
+    } else {
+        alertsEl.innerHTML = '';
+    }
+}
+
+function updateFullscreenUserLocation(lat, lng, accuracy) {
+    if (!state.fullscreenMap) return;
+    
+    // Accuracy circle
+    if (state.fullscreenAccuracyCircle) {
+        state.fullscreenAccuracyCircle.setLatLng([lat, lng]);
+        state.fullscreenAccuracyCircle.setRadius(Math.min(accuracy, 100));
+    } else {
+        state.fullscreenAccuracyCircle = L.circle([lat, lng], {
+            radius: Math.min(accuracy, 100),
+            color: '#4285F4',
+            fillColor: '#4285F4',
+            fillOpacity: 0.15,
+            weight: 2
+        }).addTo(state.fullscreenMap);
+    }
+    
+    // User marker with heading indicator
+    if (state.fullscreenUserMarker) {
+        state.fullscreenUserMarker.setLatLng([lat, lng]);
+    } else {
+        state.fullscreenUserMarker = L.marker([lat, lng], {
+            icon: L.divIcon({
+                className: 'nav-user-marker',
+                html: `<div class="nav-arrow"></div>`,
+                iconSize: [40, 40],
+                iconAnchor: [20, 20]
+            }),
+            zIndexOffset: 1000
+        }).addTo(state.fullscreenMap);
+    }
+    
+    // Rotate arrow based on heading
+    const arrow = document.querySelector('.nav-arrow');
+    if (arrow && state.currentHeading) {
+        arrow.style.transform = `rotate(${state.currentHeading}deg)`;
+    }
+}
+
+function updateMainMapUserLocation(lat, lng, accuracy) {
+    if (!state.map) return;
+    
+    if (state.userAccuracyCircle) {
+        state.userAccuracyCircle.setLatLng([lat, lng]);
+        state.userAccuracyCircle.setRadius(accuracy);
+    } else {
+        state.userAccuracyCircle = L.circle([lat, lng], {
+            radius: accuracy,
+            color: '#4285F4',
+            fillColor: '#4285F4',
+            fillOpacity: 0.15,
+            weight: 1
+        }).addTo(state.map);
+    }
+    
+    if (state.userLocationMarker) {
+        state.userLocationMarker.setLatLng([lat, lng]);
+    } else {
+        state.userLocationMarker = L.marker([lat, lng], {
+            icon: L.divIcon({
+                className: 'user-location-marker',
+                html: `<div class="user-dot-outer"></div><div class="user-dot-inner"></div>`,
+                iconSize: [24, 24],
+                iconAnchor: [12, 12]
+            }),
+            zIndexOffset: 1000
+        }).addTo(state.map);
+    }
+    
+    document.getElementById('user-location-legend').classList.remove('hidden');
+}
+
+function updateCurrentDirection(step) {
+    const icon = getDirectionIcon(step.type);
+    const distance = formatStepDistance(step.distanceMeters);
+    
+    document.getElementById('nav-direction-icon').textContent = icon;
+    document.getElementById('nav-direction-text').textContent = step.instruction;
+    document.getElementById('nav-direction-distance').textContent = distance;
+}
+
+function recenterFullscreenMap() {
+    setFollowMode(true);
+    if (state.currentUserLocation && state.fullscreenMap) {
+        state.fullscreenMap.setView(
+            [state.currentUserLocation.lat, state.currentUserLocation.lon],
+            17,
+            { animate: true }
+        );
+    }
+}
+
+function recenterOnUser() {
+    if (state.currentUserLocation && state.map) {
+        state.map.setView(
+            [state.currentUserLocation.lat, state.currentUserLocation.lon],
+            16,
+            { animate: true }
+        );
+    }
 }
 
 // ==========================================
@@ -337,210 +1089,6 @@ function handleInputModeChange(e) {
 }
 
 // ==========================================
-// FULLSCREEN NAVIGATION MODE
-// ==========================================
-
-function startFullscreenNavigation() {
-    const routeData = state.selectedRoute === 'shortest' ? state.shortestRouteData : state.fastestRouteData;
-    if (!routeData) {
-        showError('No route selected');
-        return;
-    }
-    
-    state.isNavigating = true;
-    
-    document.getElementById('fullscreen-nav').classList.remove('hidden');
-    document.body.style.overflow = 'hidden';
-    
-    if (!state.fullscreenMap) {
-        state.fullscreenMap = L.map('fullscreen-map', {
-            zoomControl: false,
-            attributionControl: false
-        }).setView([state.startCoords.lat, state.startCoords.lon], 16);
-        
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 19
-        }).addTo(state.fullscreenMap);
-    }
-    
-    if (state.fullscreenRouteLayer) {
-        state.fullscreenMap.removeLayer(state.fullscreenRouteLayer);
-    }
-    
-    const routeCoords = decodePolyline(routeData.geometry);
-    state.fullscreenRouteLayer = L.polyline(routeCoords, {
-        color: '#2563eb',
-        weight: 8,
-        opacity: 0.9
-    }).addTo(state.fullscreenMap);
-    
-    L.marker([state.endCoords.lat, state.endCoords.lon], {
-        icon: L.divIcon({
-            className: 'destination-marker',
-            html: '<div class="dest-icon">🏁</div>',
-            iconSize: [40, 40],
-            iconAnchor: [20, 20]
-        })
-    }).addTo(state.fullscreenMap);
-    
-    document.getElementById('nav-distance-remaining').textContent = `${routeData.distance.toFixed(1)} mi`;
-    document.getElementById('nav-time-remaining').textContent = `~${Math.round(routeData.duration)} min`;
-    
-    if (routeData.instructions && routeData.instructions.length > 0) {
-        updateCurrentDirection(routeData.instructions[0]);
-    }
-    
-    startNavigationGPS();
-    
-    state.fullscreenMap.fitBounds(L.latLngBounds(routeCoords), { padding: [50, 50] });
-    
-    setTimeout(() => {
-        if (state.currentUserLocation) {
-            state.fullscreenMap.setView([state.currentUserLocation.lat, state.currentUserLocation.lon], 17);
-        }
-    }, 1000);
-}
-
-function exitFullscreenNavigation() {
-    state.isNavigating = false;
-    document.getElementById('fullscreen-nav').classList.add('hidden');
-    document.body.style.overflow = '';
-    
-    if (state.gpsWatchId) {
-        navigator.geolocation.clearWatch(state.gpsWatchId);
-        state.gpsWatchId = null;
-    }
-}
-
-function startNavigationGPS() {
-    if (!navigator.geolocation) return;
-    
-    if (state.gpsWatchId) {
-        navigator.geolocation.clearWatch(state.gpsWatchId);
-    }
-    
-    state.gpsWatchId = navigator.geolocation.watchPosition(
-        (position) => {
-            const { latitude, longitude, accuracy } = position.coords;
-            state.currentUserLocation = { lat: latitude, lon: longitude };
-            
-            updateFullscreenUserLocation(latitude, longitude, accuracy);
-            
-            // AUTO-CENTER: Always keep map centered on user during navigation
-            if (state.isNavigating && state.fullscreenMap) {
-                state.fullscreenMap.setView([latitude, longitude], state.fullscreenMap.getZoom(), {
-                    animate: true,
-                    duration: 0.3
-                });
-            }
-            
-            updateMainMapUserLocation(latitude, longitude, accuracy);
-        },
-        (error) => {
-            console.error('GPS error:', error);
-        },
-        {
-            enableHighAccuracy: true,
-            maximumAge: 1000,
-            timeout: 10000
-        }
-    );
-}
-
-function updateFullscreenUserLocation(lat, lng, accuracy) {
-    if (!state.fullscreenMap) return;
-    
-    if (state.fullscreenAccuracyCircle) {
-        state.fullscreenAccuracyCircle.setLatLng([lat, lng]);
-        state.fullscreenAccuracyCircle.setRadius(Math.min(accuracy, 100));
-    } else {
-        state.fullscreenAccuracyCircle = L.circle([lat, lng], {
-            radius: Math.min(accuracy, 100),
-            color: '#4285F4',
-            fillColor: '#4285F4',
-            fillOpacity: 0.15,
-            weight: 2
-        }).addTo(state.fullscreenMap);
-    }
-    
-    if (state.fullscreenUserMarker) {
-        state.fullscreenUserMarker.setLatLng([lat, lng]);
-    } else {
-        state.fullscreenUserMarker = L.marker([lat, lng], {
-            icon: L.divIcon({
-                className: 'nav-user-marker',
-                html: `<div class="nav-dot-outer"></div><div class="nav-dot-inner"></div>`,
-                iconSize: [30, 30],
-                iconAnchor: [15, 15]
-            }),
-            zIndexOffset: 1000
-        }).addTo(state.fullscreenMap);
-    }
-}
-
-function updateMainMapUserLocation(lat, lng, accuracy) {
-    if (!state.map) return;
-    
-    if (state.userAccuracyCircle) {
-        state.userAccuracyCircle.setLatLng([lat, lng]);
-        state.userAccuracyCircle.setRadius(accuracy);
-    } else {
-        state.userAccuracyCircle = L.circle([lat, lng], {
-            radius: accuracy,
-            color: '#4285F4',
-            fillColor: '#4285F4',
-            fillOpacity: 0.15,
-            weight: 1
-        }).addTo(state.map);
-    }
-    
-    if (state.userLocationMarker) {
-        state.userLocationMarker.setLatLng([lat, lng]);
-    } else {
-        state.userLocationMarker = L.marker([lat, lng], {
-            icon: L.divIcon({
-                className: 'user-location-marker',
-                html: `<div class="user-dot-outer"></div><div class="user-dot-inner"></div>`,
-                iconSize: [24, 24],
-                iconAnchor: [12, 12]
-            }),
-            zIndexOffset: 1000
-        }).addTo(state.map);
-    }
-    
-    document.getElementById('user-location-legend').classList.remove('hidden');
-}
-
-function updateCurrentDirection(step) {
-    const icon = getDirectionIcon(step.type);
-    const distance = formatStepDistance(step.distanceMeters);
-    
-    document.getElementById('nav-direction-icon').textContent = icon;
-    document.getElementById('nav-direction-text').textContent = step.instruction;
-    document.getElementById('nav-direction-distance').textContent = distance;
-}
-
-function recenterFullscreenMap() {
-    if (state.currentUserLocation && state.fullscreenMap) {
-        state.fullscreenMap.setView(
-            [state.currentUserLocation.lat, state.currentUserLocation.lon],
-            17,
-            { animate: true }
-        );
-    }
-}
-
-function recenterOnUser() {
-    if (state.currentUserLocation && state.map) {
-        state.map.setView(
-            [state.currentUserLocation.lat, state.currentUserLocation.lon],
-            16,
-            { animate: true }
-        );
-    }
-}
-
-// ==========================================
 // SEARCH & ROUTES
 // ==========================================
 
@@ -595,7 +1143,7 @@ async function handleSearch() {
         drawRoutes(state.shortestRouteData, state.fastestRouteData);
         displayResults(comparison);
         
-        // Fetch elevation data in the background
+        // Fetch elevation data in background
         fetchBothElevations(start, end);
         
     } catch (error) {
@@ -689,6 +1237,77 @@ async function fetchRouteWithStrategy(start, end, preference, avoidFeatures, wit
             type: step.type || 0
         }))
     };
+}
+
+// ==========================================
+// ELEVATION
+// ==========================================
+
+async function fetchElevation(lat, lon) {
+    try {
+        const url = `${CONFIG.ELEVATION_API_URL}?locations=${lat},${lon}`;
+        const response = await fetch(url);
+        if (!response.ok) throw new Error('Elevation API error');
+        const data = await response.json();
+        if (data.results && data.results.length > 0) {
+            return data.results[0].elevation;
+        }
+        throw new Error('No elevation data');
+    } catch (err) {
+        console.warn('Elevation fetch failed:', err);
+        return null;
+    }
+}
+
+async function fetchBothElevations(startCoords, endCoords) {
+    try {
+        const [startElev, endElev] = await Promise.all([
+            fetchElevation(startCoords.lat, startCoords.lon),
+            fetchElevation(endCoords.lat, endCoords.lon)
+        ]);
+        
+        state.startElevation = startElev;
+        state.endElevation = endElev;
+        displayElevation(startElev, endElev);
+    } catch (err) {
+        console.warn('Could not fetch elevation:', err);
+        document.getElementById('elevation-card').classList.add('hidden');
+    }
+}
+
+function displayElevation(startElev, endElev) {
+    const card = document.getElementById('elevation-card');
+    
+    if (startElev === null || endElev === null) {
+        card.classList.add('hidden');
+        return;
+    }
+    
+    const startFeet = Math.round(startElev * 3.28084);
+    const endFeet = Math.round(endElev * 3.28084);
+    const diffFeet = endFeet - startFeet;
+    
+    document.getElementById('start-elevation').textContent = `${startFeet.toLocaleString()} ft`;
+    document.getElementById('end-elevation').textContent = `${endFeet.toLocaleString()} ft`;
+    
+    const diffEl = document.getElementById('elevation-diff');
+    const labelEl = document.getElementById('elevation-label');
+    
+    if (diffFeet > 0) {
+        labelEl.textContent = '📈 Gain:';
+        diffEl.textContent = `+${diffFeet.toLocaleString()} ft`;
+        diffEl.className = 'elevation-value uphill';
+    } else if (diffFeet < 0) {
+        labelEl.textContent = '📉 Drop:';
+        diffEl.textContent = `${diffFeet.toLocaleString()} ft`;
+        diffEl.className = 'elevation-value downhill';
+    } else {
+        labelEl.textContent = 'Change:';
+        diffEl.textContent = '0 ft (flat)';
+        diffEl.className = 'elevation-value';
+    }
+    
+    card.classList.remove('hidden');
 }
 
 // ==========================================
@@ -814,6 +1433,7 @@ function decodePolyline(encoded) {
 
 function displayResults(comparison) {
     const timeTolerance = parseFloat(document.getElementById('time-tolerance').value);
+    const minSavings = parseFloat(document.getElementById('min-savings').value);
     const { shortestRoute, fastestRoute, milesSaved, extraTime } = comparison;
     
     document.getElementById('results-section').classList.remove('hidden');
@@ -827,7 +1447,12 @@ function displayResults(comparison) {
         `Analyzed ${state.routesAnalyzed} route strategies, showing best 2`;
     
     const card = document.getElementById('recommendation-card');
-    if (milesSaved > 0.5) {
+    
+    // Check minimum savings threshold
+    if (milesSaved < minSavings) {
+        card.className = 'recommendation-card info';
+        card.innerHTML = `<div class="title">ℹ️ Savings Below Threshold</div><div class="subtitle">Only ${milesSaved.toFixed(2)} mi saved (threshold: ${minSavings} mi)</div>`;
+    } else if (milesSaved > 0.5) {
         if (extraTime <= timeTolerance) {
             card.className = 'recommendation-card success';
             card.innerHTML = `<div class="title">✅ Take the Shortest Route!</div><div class="subtitle">Save ${milesSaved.toFixed(2)} mi with ~${Math.abs(extraTime).toFixed(0)} extra min</div>`;
