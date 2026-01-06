@@ -3,98 +3,70 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
-    <meta name="description" content="MileSaver - Find shortest routes with turn-by-turn directions">
+    <meta name="description" content="MileSaver - Find shortest routes to save money">
     <meta name="theme-color" content="#2563eb">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     
     <link rel="manifest" href="manifest.json">
-    <link rel="icon" type="image/png" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💰</text></svg>">
-    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💰</text></svg>">
-    
     <title>MileSaver - Save Miles, Save Money</title>
     
-    <!-- Google Maps API -->
     <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0&libraries=places&callback=Function.prototype"></script>
-    
-    <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
     <div id="app">
-        <!-- Header -->
-        <header class="header" id="main-header">
+        <header class="header">
             <div class="header-content">
                 <h1>💰 MileSaver</h1>
                 <p class="tagline">Find Shortest Routes, Save Money</p>
             </div>
         </header>
 
-        <!-- Main Layout -->
         <main class="main-layout">
-            <!-- LEFT SIDEBAR -->
-            <aside class="sidebar" id="sidebar">
-                <!-- Input Card -->
+            <aside class="sidebar">
                 <div class="card">
                     <h2 class="card-title">📍 Route Details</h2>
                     
                     <div class="input-mode-toggle">
-                        <label>
-                            <input type="radio" name="input-mode" value="address" checked>
-                            <span>Address</span>
-                        </label>
-                        <label>
-                            <input type="radio" name="input-mode" value="coordinates">
-                            <span>Coords</span>
-                        </label>
+                        <label><input type="radio" name="input-mode" value="address" checked><span>Address</span></label>
+                        <label><input type="radio" name="input-mode" value="coordinates"><span>Coords</span></label>
                     </div>
                     
-                    <!-- Address Inputs with Swap Button -->
                     <div id="address-inputs" class="input-container">
                         <div class="input-group">
-                            <label><span class="icon">🟢</span> Start</label>
+                            <label>🟢 Start</label>
                             <div class="input-with-button">
                                 <input type="text" id="start-location" placeholder="Type address..." autocomplete="off">
-                                <button type="button" id="use-my-location-btn" class="location-btn" title="Use my current location">
-                                    📍
-                                </button>
+                                <button type="button" id="use-my-location-btn" class="location-btn">📍</button>
                             </div>
                         </div>
-                        
-                        <!-- SWAP BUTTON -->
                         <div class="swap-container">
-                            <button type="button" id="swap-btn" class="swap-btn" title="Swap start and end">
-                                ⇅
-                            </button>
+                            <button type="button" id="swap-btn" class="swap-btn">⇅</button>
                         </div>
-                        
                         <div class="input-group">
-                            <label><span class="icon">🔴</span> End</label>
+                            <label>🔴 End</label>
                             <input type="text" id="end-location" placeholder="Type address..." autocomplete="off">
                         </div>
                     </div>
                     
-                    <!-- Coordinate Inputs -->
                     <div id="coordinate-inputs" class="input-container hidden">
                         <div class="input-group">
-                            <label><span class="icon">🟢</span> Start</label>
+                            <label>🟢 Start</label>
                             <div class="input-with-button">
-                                <input type="text" id="start-coords" placeholder="47.6062, -122.0321" autocomplete="off">
-                                <button type="button" id="use-my-location-coords-btn" class="location-btn" title="Use my current location">
-                                    📍
-                                </button>
+                                <input type="text" id="start-coords" placeholder="47.6062, -122.3321" autocomplete="off">
+                                <button type="button" id="use-my-location-coords-btn" class="location-btn">📍</button>
                             </div>
                         </div>
                         <div class="input-group">
-                            <label><span class="icon">🔴</span> End</label>
+                            <label>🔴 End</label>
                             <input type="text" id="end-coords" placeholder="47.5301, -122.0357" autocomplete="off">
                         </div>
                     </div>
                 </div>
 
-                <!-- Preferences -->
                 <div class="card">
                     <h3 class="card-subtitle">⚙️ Preferences</h3>
                     <div class="setting-group">
@@ -103,112 +75,65 @@
                     </div>
                     <div class="setting-group">
                         <label>Trips/month: <strong id="trips-per-month-value">4</strong>x</label>
-                        <input type="range" id="trips-per-month" min="1" max="30" step="1" value="4">
+                        <input type="range" id="trips-per-month" min="1" max="30" value="4">
                     </div>
                     <div class="setting-group">
                         <label>Cost per mile: $<strong id="cost-per-mile-value">0.25</strong></label>
                         <input type="range" id="cost-per-mile" min="0.10" max="1.00" step="0.05" value="0.25">
                     </div>
                     <div class="setting-group">
-                        <label>Show shortest only if saves: <strong id="min-savings-value">0.5</strong>+ mi</label>
+                        <label>Min savings: <strong id="min-savings-value">0.5</strong>+ mi</label>
                         <input type="range" id="min-savings" min="0" max="5" step="0.5" value="0.5">
-                        <small class="hint">Set to 0 to always show shortest route</small>
                     </div>
                 </div>
 
-                <!-- Search Button -->
-                <button id="search-btn" class="search-btn">
-                    <span class="icon">🔍</span> Find Best Route
-                </button>
+                <button id="search-btn" class="search-btn">🔍 Find Best Route</button>
 
-                <!-- Error Message -->
                 <div id="error-message" class="error-message hidden"></div>
 
-                <!-- RESULTS SECTION -->
                 <div id="results-section" class="results-section hidden">
-                    <!-- Recommendation -->
                     <div id="recommendation-card" class="recommendation-card"></div>
 
-                    <!-- Route Comparison -->
                     <div class="routes-comparison-compact">
-                        <div class="route-card-compact shortest clickable" data-route="shortest">
-                            <div class="route-header">Shortest</div>
-                            <div class="route-stat">
-                                <span id="shortest-distance" class="stat-value">-</span>
-                            </div>
-                            <div class="route-time" id="shortest-duration">-</div>
+                        <div class="route-card-compact shortest" data-route="shortest">
+                            <div class="route-header">SHORTEST</div>
+                            <div id="shortest-distance" class="stat-value">-</div>
+                            <div id="shortest-duration" class="route-time">-</div>
                             <small class="route-hint">Click for directions</small>
                         </div>
-                        <div class="route-card-compact fastest clickable" data-route="fastest">
-                            <div class="route-header">Fastest</div>
-                            <div class="route-stat">
-                                <span id="fastest-distance" class="stat-value">-</span>
-                            </div>
-                            <div class="route-time" id="fastest-duration">-</div>
+                        <div class="route-card-compact fastest" data-route="fastest">
+                            <div class="route-header">FASTEST</div>
+                            <div id="fastest-distance" class="stat-value">-</div>
+                            <div id="fastest-duration" class="route-time">-</div>
                             <small class="route-hint">Click for directions</small>
                         </div>
                     </div>
 
-                    <!-- Time Disclaimer -->
-                    <div class="disclaimer">
-                        ⏱️ Travel times are estimates without live traffic data
-                    </div>
+                    <div class="disclaimer">⏱️ Times are estimates without live traffic</div>
 
-                    <!-- Elevation Info -->
                     <div id="elevation-card" class="elevation-card hidden">
                         <div class="elevation-header">🏔️ Elevation</div>
-                        <div class="elevation-row">
-                            <span>Start:</span>
-                            <span id="start-elevation">--</span>
-                        </div>
-                        <div class="elevation-row">
-                            <span>End:</span>
-                            <span id="end-elevation">--</span>
-                        </div>
-                        <div class="elevation-row total">
-                            <span id="elevation-label">Change:</span>
-                            <span id="elevation-diff" class="elevation-value">--</span>
-                        </div>
+                        <div class="elevation-row"><span>Start:</span><span id="start-elevation">--</span></div>
+                        <div class="elevation-row"><span>End:</span><span id="end-elevation">--</span></div>
+                        <div class="elevation-row total"><span id="elevation-label">Change:</span><span id="elevation-diff" class="elevation-value">--</span></div>
                     </div>
 
-                    <!-- START NAVIGATION BUTTON -->
-                    <button id="start-nav-btn" class="start-nav-btn">
-                        🚗 Start Navigation
-                    </button>
+                    <button id="start-nav-btn" class="start-nav-btn">🚗 Start Navigation</button>
 
-                    <!-- Savings -->
                     <div class="savings-card-compact">
                         <div class="savings-header">💰 Your Savings</div>
-                        <div class="savings-row">
-                            <span>Per Trip:</span>
-                            <span id="miles-saved" class="savings-value">-</span>
-                        </div>
-                        <div class="savings-row">
-                            <span>Monthly Miles:</span>
-                            <span id="monthly-miles" class="savings-value">-</span>
-                        </div>
-                        <div class="savings-row">
-                            <span>Monthly $:</span>
-                            <span id="monthly-savings" class="savings-value">-</span>
-                        </div>
-                        <div class="savings-row total">
-                            <span>Annual:</span>
-                            <span id="annual-savings" class="savings-value-large">-</span>
-                        </div>
-                        <div class="savings-disclaimer">
-                            💡 Based on $<span id="cost-disclaimer-value">0.25</span>/mile
-                        </div>
+                        <div class="savings-row"><span>Per Trip:</span><span id="miles-saved" class="savings-value">-</span></div>
+                        <div class="savings-row"><span>Monthly Miles:</span><span id="monthly-miles" class="savings-value">-</span></div>
+                        <div class="savings-row"><span>Monthly $:</span><span id="monthly-savings" class="savings-value">-</span></div>
+                        <div class="savings-row total"><span>Annual:</span><span id="annual-savings" class="savings-value-large">-</span></div>
+                        <div class="savings-disclaimer">💡 Based on $<span id="cost-disclaimer-value">0.25</span>/mile</div>
                     </div>
 
-                    <!-- Routes Analyzed Info -->
-                    <div class="routes-analyzed" id="routes-analyzed">
-                        Analyzed 5 route strategies, showing best 2
-                    </div>
+                    <div class="routes-analyzed" id="routes-analyzed"></div>
 
-                    <!-- TURN-BY-TURN DIRECTIONS PANEL -->
                     <div id="directions-panel" class="directions-panel hidden">
                         <div class="directions-header">
-                            <h3 id="directions-title">📍 Turn-by-Turn Directions</h3>
+                            <h3 id="directions-title">📍 Directions</h3>
                             <button id="close-directions" class="close-btn">✕</button>
                         </div>
                         <div id="directions-content" class="directions-content"></div>
@@ -216,49 +141,31 @@
                 </div>
             </aside>
 
-            <!-- RIGHT: LARGE MAP -->
-            <section class="map-section-large" id="map-section">
+            <section class="map-section-large">
                 <div id="map" class="map-container-large"></div>
                 <div id="loading-spinner" class="loading-spinner hidden">
                     <div class="spinner"></div>
                     <p>Finding routes...</p>
                 </div>
-                
-                <!-- Re-center button -->
-                <button id="recenter-btn" class="recenter-btn hidden" title="Center map on my location">
-                    🎯
-                </button>
-                
+                <button id="recenter-btn" class="recenter-btn hidden">🎯</button>
                 <div id="map-legend" class="map-legend hidden">
                     <div class="legend-title">Routes</div>
-                    <div class="legend-item">
-                        <span class="legend-line shortest"></span>
-                        <span class="legend-text"><strong>Shortest</strong></span>
-                    </div>
-                    <div class="legend-item">
-                        <span class="legend-line fastest"></span>
-                        <span class="legend-text"><strong>Fastest</strong></span>
-                    </div>
-                    <div id="user-location-legend" class="legend-item hidden">
-                        <span class="legend-icon">🔵</span>
-                        <span class="legend-text"><strong>You</strong></span>
-                    </div>
+                    <div class="legend-item"><span class="legend-line shortest"></span><span>Shortest</span></div>
+                    <div class="legend-item"><span class="legend-line fastest"></span><span>Fastest</span></div>
+                    <div id="user-location-legend" class="legend-item hidden"><span>🔵</span><span>You</span></div>
                 </div>
             </section>
         </main>
     </div>
 
-    <!-- FULLSCREEN NAVIGATION OVERLAY -->
+    <!-- FULLSCREEN NAVIGATION -->
     <div id="fullscreen-nav" class="fullscreen-nav hidden">
-        <!-- Container that clips the oversized map -->
         <div class="fullscreen-map-container">
-            <!-- Wrapper that rotates - oversized to prevent black corners -->
             <div id="map-rotation-wrapper">
                 <div id="fullscreen-map"></div>
             </div>
         </div>
         
-        <!-- Navigation Header -->
         <div class="nav-header">
             <button id="exit-nav-btn" class="exit-nav-btn">✕ Exit</button>
             <div class="nav-status">
@@ -267,23 +174,16 @@
             </div>
         </div>
         
-        <!-- Compass Indicator -->
         <div class="compass-container">
-            <div id="compass-indicator">
-                <span class="compass-needle">🔺</span>
-            </div>
+            <div id="compass-indicator"><span class="compass-needle">🔺</span></div>
         </div>
         
-        <!-- Speed Limit Display -->
-        <div class="speed-limit-display" id="speed-limit-display">
-            <div class="speed-limit-sign" id="speed-limit-sign">
-                <span id="speed-limit-value">--</span>
-            </div>
+        <div class="speed-limit-display">
+            <div class="speed-limit-sign" id="speed-limit-sign"><span id="speed-limit-value">--</span></div>
             <div class="current-speed" id="current-speed">-- mph</div>
         </div>
         
-        <!-- Current Direction Card -->
-        <div class="current-direction-card" id="current-direction-card">
+        <div class="current-direction-card">
             <div class="direction-icon" id="nav-direction-icon">⬆️</div>
             <div class="direction-info">
                 <div class="direction-text" id="nav-direction-text">Start navigation</div>
@@ -291,33 +191,30 @@
             </div>
         </div>
         
-        <!-- Map Controls -->
         <div class="nav-controls">
-            <button id="fullscreen-recenter-btn" class="fullscreen-recenter-btn" title="Re-center on my location">🎯</button>
-            <button id="toggle-north-btn" class="nav-control-btn active" title="Toggle heading/north-up">🧭</button>
+            <button id="fullscreen-recenter-btn" class="fullscreen-recenter-btn">🎯</button>
+            <button id="toggle-north-btn" class="nav-control-btn active">🧭</button>
         </div>
         
-        <!-- Rerouting Notification -->
         <div id="rerouting-toast" class="rerouting-toast hidden">
             <div class="rerouting-spinner"></div>
             <span>Rerouting...</span>
         </div>
         
-        <!-- Off Route Warning -->
-        <div id="off-route-warning" class="off-route-warning hidden">
-            ⚠️ You are off route
+        <div id="off-route-warning" class="off-route-warning hidden">⚠️ Recalculating route...</div>
+        
+        <!-- ARRIVED NOTIFICATION -->
+        <div id="arrived-toast" class="arrived-toast hidden">
+            <div class="arrived-icon">🎉</div>
+            <div class="arrived-text">You have arrived!</div>
         </div>
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="app.js"></script>
-    
     <script>
         if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                navigator.serviceWorker.register('service-worker.js')
-                    .catch(err => console.log('SW registration failed'));
-            });
+            navigator.serviceWorker.register('service-worker.js').catch(() => {});
         }
     </script>
 </body>
