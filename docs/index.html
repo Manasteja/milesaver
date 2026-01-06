@@ -51,6 +51,7 @@
                         </label>
                     </div>
                     
+                    <!-- Address Inputs with Swap Button -->
                     <div id="address-inputs" class="input-container">
                         <div class="input-group">
                             <label><span class="icon">🟢</span> Start</label>
@@ -61,12 +62,21 @@
                                 </button>
                             </div>
                         </div>
+                        
+                        <!-- SWAP BUTTON -->
+                        <div class="swap-container">
+                            <button type="button" id="swap-btn" class="swap-btn" title="Swap start and end">
+                                ⇅
+                            </button>
+                        </div>
+                        
                         <div class="input-group">
                             <label><span class="icon">🔴</span> End</label>
                             <input type="text" id="end-location" placeholder="Type address..." autocomplete="off">
                         </div>
                     </div>
                     
+                    <!-- Coordinate Inputs -->
                     <div id="coordinate-inputs" class="input-container hidden">
                         <div class="input-group">
                             <label><span class="icon">🟢</span> Start</label>
@@ -257,7 +267,7 @@
             </div>
         </div>
         
-        <!-- Compass Indicator (shows which way is North) -->
+        <!-- Compass Indicator -->
         <div class="compass-container">
             <div id="compass-indicator">
                 <span class="compass-needle">🔺</span>
