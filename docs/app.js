@@ -1,16 +1,16 @@
 /**
- * MileSaver - PROFESSIONAL NAVIGATION EDITION
- * Features: Wake lock, Map rotation, Rerouting, Speed limits, Stop signs
+ * MileSaver - PROFESSIONAL NAVIGATION v2
+ * Features: Heading-based orientation, full-screen rotation, traffic markers on map
  */
 
 const CONFIG = {
-    API_KEY: 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImEyODcyMTRmYjAzODRiNmVhYmE4MTU3Njc5MTg0Y2NhIiwiaCI6Im11cm11cjY0In0=',
+    API_KEY: '5b3ce3597851110001cf6248a287214fb0384b6eaba815767918a4cca',
     GOOGLE_API_KEY: 'AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0',
     API_BASE_URL: 'https://api.openrouteservice.org/v2/directions/driving-car',
     ELEVATION_API_URL: 'https://api.open-elevation.com/api/v1/lookup',
     OVERPASS_API_URL: 'https://overpass-api.de/api/interpreter',
-    OFF_ROUTE_THRESHOLD: 50, // meters before rerouting
-    REROUTE_COOLDOWN: 10000, // 10 seconds between reroutes
+    OFF_ROUTE_THRESHOLD: 50,
+    REROUTE_COOLDOWN: 10000,
 };
 
 const state = {
@@ -25,8 +25,7 @@ const state = {
     fullscreenRouteLayer: null,
     shortestRouteLayer: null,
     fastestRouteLayer: null,
-    speedLimitMarkers: [],
-    stopSignMarkers: [],
+    trafficMarkers: [],
     startCoords: null,
     endCoords: null,
     routeComparison: null,
@@ -46,11 +45,11 @@ const state = {
     startElevation: null,
     endElevation: null,
     wakeLock: null,
-    mapRotation: 0,
     lastRerouteTime: 0,
     isRerouting: false,
     speedLimits: [],
     stopSigns: [],
+    trafficSignals: [],
     currentSpeedLimit: null,
     currentStepIndex: 0
 };
@@ -83,8 +82,7 @@ function initializeApp() {
     document.getElementById('start-nav-btn').addEventListener('click', startFullscreenNavigation);
     document.getElementById('exit-nav-btn').addEventListener('click', exitFullscreenNavigation);
     document.getElementById('fullscreen-recenter-btn').addEventListener('click', recenterFullscreenMap);
-    document.getElementById('rotate-north-btn').addEventListener('click', resetMapRotation);
-    document.getElementById('toggle-follow-btn').addEventListener('click', toggleFollowMode);
+    document.getElementById('toggle-north-btn').addEventListener('click', toggleNorthUp);
     
     // Route card clicks
     document.querySelectorAll('.route-card-compact').forEach(card => {
@@ -111,7 +109,7 @@ function initializeApp() {
         state.googleEndCoords = null;
     });
     
-    console.log('MileSaver PRO initialized!');
+    console.log('MileSaver PRO v2 initialized!');
 }
 
 function setupSliders() {
@@ -152,7 +150,6 @@ async function requestWakeLock() {
             console.log('Wake lock released');
         });
         
-        // Re-acquire wake lock if page becomes visible again
         document.addEventListener('visibilitychange', async () => {
             if (state.isNavigating && document.visibilityState === 'visible') {
                 await requestWakeLock();
@@ -180,22 +177,22 @@ async function releaseWakeLock() {
 }
 
 // ==========================================
-// SPEED LIMITS & STOP SIGNS (Overpass API)
+// TRAFFIC DATA (Speed Limits, Stop Signs, Traffic Signals)
 // ==========================================
 
 async function fetchTrafficData(routeCoords) {
     if (!routeCoords || routeCoords.length < 2) return;
     
     try {
-        // Calculate bounding box with padding
         const bounds = calculateBounds(routeCoords);
-        const padding = 0.005; // ~500m padding
+        const padding = 0.003;
         
         const query = `
             [out:json][timeout:25];
             (
                 way["maxspeed"](${bounds.south - padding},${bounds.west - padding},${bounds.north + padding},${bounds.east + padding});
                 node["highway"="stop"](${bounds.south - padding},${bounds.west - padding},${bounds.north + padding},${bounds.east + padding});
+                node["highway"="traffic_signals"](${bounds.south - padding},${bounds.west - padding},${bounds.north + padding},${bounds.east + padding});
             );
             out body;
             >;
@@ -213,6 +210,11 @@ async function fetchTrafficData(routeCoords) {
         const data = await response.json();
         processTrafficData(data);
         
+        // Display markers on the fullscreen map
+        if (state.fullscreenMap) {
+            displayTrafficMarkersOnMap(state.fullscreenMap);
+        }
+        
     } catch (err) {
         console.warn('Could not fetch traffic data:', err);
     }
@@ -224,18 +226,27 @@ function processTrafficData(data) {
     const nodes = {};
     const speedLimits = [];
     const stopSigns = [];
+    const trafficSignals = [];
     
     // First pass: collect all nodes
     data.elements.forEach(el => {
         if (el.type === 'node') {
             nodes[el.id] = { lat: el.lat, lon: el.lon, tags: el.tags };
             
-            // Check if it's a stop sign
+            // Stop signs
             if (el.tags && el.tags.highway === 'stop') {
                 stopSigns.push({
                     lat: el.lat,
                     lon: el.lon,
                     direction: el.tags.direction || 'all'
+                });
+            }
+            
+            // Traffic signals
+            if (el.tags && el.tags.highway === 'traffic_signals') {
+                trafficSignals.push({
+                    lat: el.lat,
+                    lon: el.lon
                 });
             }
         }
@@ -246,7 +257,6 @@ function processTrafficData(data) {
         if (el.type === 'way' && el.tags && el.tags.maxspeed) {
             const speedValue = parseSpeedLimit(el.tags.maxspeed);
             if (speedValue && el.nodes && el.nodes.length > 0) {
-                // Get the midpoint of the way for marker placement
                 const midIndex = Math.floor(el.nodes.length / 2);
                 const midNodeId = el.nodes[midIndex];
                 const midNode = nodes[midNodeId];
@@ -265,20 +275,19 @@ function processTrafficData(data) {
     
     state.speedLimits = speedLimits;
     state.stopSigns = stopSigns;
+    state.trafficSignals = trafficSignals;
     
-    console.log(`Found ${speedLimits.length} speed limits, ${stopSigns.length} stop signs`);
+    console.log(`Found ${speedLimits.length} speed limits, ${stopSigns.length} stop signs, ${trafficSignals.length} traffic signals`);
 }
 
 function parseSpeedLimit(maxspeed) {
     if (!maxspeed) return null;
     
-    // Handle common formats
     const numMatch = maxspeed.match(/(\d+)/);
     if (!numMatch) return null;
     
     let speed = parseInt(numMatch[1]);
     
-    // Convert km/h to mph if needed
     if (maxspeed.includes('km/h') || (!maxspeed.includes('mph') && speed > 80)) {
         speed = Math.round(speed * 0.621371);
     }
@@ -299,6 +308,55 @@ function calculateBounds(coords) {
     return { north, south, east, west };
 }
 
+function displayTrafficMarkersOnMap(map) {
+    // Clear existing markers
+    state.trafficMarkers.forEach(m => map.removeLayer(m));
+    state.trafficMarkers = [];
+    
+    // Add stop sign markers - visible on the map
+    state.stopSigns.forEach(sign => {
+        const marker = L.marker([sign.lat, sign.lon], {
+            icon: L.divIcon({
+                className: 'traffic-marker stop-sign',
+                html: `<div class="stop-octagon">STOP</div>`,
+                iconSize: [32, 32],
+                iconAnchor: [16, 16]
+            }),
+            interactive: false
+        }).addTo(map);
+        state.trafficMarkers.push(marker);
+    });
+    
+    // Add traffic signal markers - visible on the map
+    state.trafficSignals.forEach(signal => {
+        const marker = L.marker([signal.lat, signal.lon], {
+            icon: L.divIcon({
+                className: 'traffic-marker traffic-signal',
+                html: `<div class="signal-icon">🚦</div>`,
+                iconSize: [28, 28],
+                iconAnchor: [14, 14]
+            }),
+            interactive: false
+        }).addTo(map);
+        state.trafficMarkers.push(marker);
+    });
+    
+    // Add speed limit markers (fewer to avoid clutter)
+    const shownSpeedLimits = state.speedLimits.filter((_, i) => i % 5 === 0);
+    shownSpeedLimits.forEach(limit => {
+        const marker = L.marker([limit.lat, limit.lon], {
+            icon: L.divIcon({
+                className: 'traffic-marker speed-limit',
+                html: `<div class="speed-sign">${limit.speed}</div>`,
+                iconSize: [28, 28],
+                iconAnchor: [14, 14]
+            }),
+            interactive: false
+        }).addTo(map);
+        state.trafficMarkers.push(marker);
+    });
+}
+
 function updateCurrentSpeedLimit(userLat, userLon) {
     if (!state.speedLimits.length) return;
     
@@ -306,12 +364,11 @@ function updateCurrentSpeedLimit(userLat, userLon) {
     let closestDist = Infinity;
     
     state.speedLimits.forEach(limit => {
-        // Check distance to the way's nodes
         if (limit.wayNodes) {
             limit.wayNodes.forEach(node => {
                 if (node) {
                     const dist = getDistanceMeters(userLat, userLon, node.lat, node.lon);
-                    if (dist < closestDist && dist < 100) { // Within 100m
+                    if (dist < closestDist && dist < 100) {
                         closestDist = dist;
                         closestLimit = limit.speed;
                     }
@@ -339,156 +396,53 @@ function updateSpeedLimitDisplay(limit) {
     }
 }
 
-function checkUpcomingStopSigns(userLat, userLon) {
-    if (!state.stopSigns.length) return [];
-    
-    const upcoming = [];
-    
-    state.stopSigns.forEach(sign => {
-        const dist = getDistanceMeters(userLat, userLon, sign.lat, sign.lon);
-        if (dist < 500 && dist > 10) { // Between 10m and 500m ahead
-            upcoming.push({
-                ...sign,
-                distance: dist
-            });
-        }
-    });
-    
-    // Sort by distance
-    upcoming.sort((a, b) => a.distance - b.distance);
-    
-    return upcoming.slice(0, 3); // Return up to 3 closest
-}
-
-function displayTrafficMarkersOnMap(map) {
-    // Clear existing markers
-    state.speedLimitMarkers.forEach(m => map.removeLayer(m));
-    state.stopSignMarkers.forEach(m => map.removeLayer(m));
-    state.speedLimitMarkers = [];
-    state.stopSignMarkers = [];
-    
-    // Add speed limit markers (show fewer to avoid clutter)
-    const shownSpeedLimits = state.speedLimits.filter((_, i) => i % 3 === 0);
-    shownSpeedLimits.forEach(limit => {
-        const marker = L.marker([limit.lat, limit.lon], {
-            icon: L.divIcon({
-                className: 'speed-limit-marker',
-                html: `<div class="speed-marker-icon">${limit.speed}</div>`,
-                iconSize: [30, 30],
-                iconAnchor: [15, 15]
-            })
-        }).addTo(map);
-        state.speedLimitMarkers.push(marker);
-    });
-    
-    // Add stop sign markers
-    state.stopSigns.forEach(sign => {
-        const marker = L.marker([sign.lat, sign.lon], {
-            icon: L.divIcon({
-                className: 'stop-sign-marker',
-                html: `<div class="stop-marker-icon">🛑</div>`,
-                iconSize: [24, 24],
-                iconAnchor: [12, 12]
-            })
-        }).addTo(map);
-        state.stopSignMarkers.push(marker);
-    });
-}
-
 // ==========================================
-// MAP ROTATION
+// HEADING-BASED MAP ORIENTATION
 // ==========================================
 
-function initializeMapRotation(map) {
-    let initialAngle = 0;
-    let initialRotation = 0;
+function rotateMapToHeading(heading) {
+    if (!state.fullscreenMap || !state.isFollowMode) return;
     
-    const mapContainer = map.getContainer();
-    
-    // Touch rotation handler
-    mapContainer.addEventListener('touchstart', (e) => {
-        if (e.touches.length === 2) {
-            initialAngle = getTouchAngle(e.touches);
-            initialRotation = state.mapRotation;
-            
-            // Disable follow mode when user interacts
-            if (state.isFollowMode) {
-                setFollowMode(false);
-            }
-        }
-    }, { passive: true });
-    
-    mapContainer.addEventListener('touchmove', (e) => {
-        if (e.touches.length === 2) {
-            const currentAngle = getTouchAngle(e.touches);
-            const angleDiff = currentAngle - initialAngle;
-            const newRotation = initialRotation + angleDiff;
-            
-            rotateMap(map, newRotation);
-        }
-    }, { passive: true });
-    
-    // Disable follow mode on any touch/drag
-    mapContainer.addEventListener('mousedown', () => {
-        if (state.isFollowMode && state.isNavigating) {
-            setFollowMode(false);
-        }
-    });
-    
-    mapContainer.addEventListener('touchstart', () => {
-        if (state.isFollowMode && state.isNavigating) {
-            setFollowMode(false);
-        }
-    }, { passive: true });
-}
-
-function getTouchAngle(touches) {
-    const dx = touches[1].clientX - touches[0].clientX;
-    const dy = touches[1].clientY - touches[0].clientY;
-    return Math.atan2(dy, dx) * (180 / Math.PI);
-}
-
-function rotateMap(map, angle) {
-    state.mapRotation = angle;
-    const container = map.getContainer();
-    container.style.transform = `rotate(${angle}deg)`;
+    // The map wrapper rotates, not the map itself
+    // This keeps the map filling the screen
+    const mapWrapper = document.getElementById('map-rotation-wrapper');
+    if (mapWrapper) {
+        // Rotate opposite to heading so user's direction is always UP
+        mapWrapper.style.transform = `rotate(${-heading}deg)`;
+    }
     
     // Counter-rotate markers to keep them upright
-    document.querySelectorAll('.leaflet-marker-icon').forEach(marker => {
-        marker.style.transform = `rotate(${-angle}deg)`;
+    document.querySelectorAll('#fullscreen-map .leaflet-marker-icon').forEach(marker => {
+        marker.style.transform = `rotate(${heading}deg)`;
     });
-}
-
-function resetMapRotation() {
-    if (state.fullscreenMap) {
-        rotateMap(state.fullscreenMap, 0);
-        state.mapRotation = 0;
+    
+    // Update compass indicator
+    const compass = document.getElementById('compass-indicator');
+    if (compass) {
+        compass.style.transform = `rotate(${-heading}deg)`;
     }
 }
 
-function setFollowMode(enabled) {
-    state.isFollowMode = enabled;
-    const btn = document.getElementById('toggle-follow-btn');
+function toggleNorthUp() {
+    state.isFollowMode = !state.isFollowMode;
+    const btn = document.getElementById('toggle-north-btn');
     
-    if (enabled) {
+    if (state.isFollowMode) {
         btn.classList.add('active');
-        btn.textContent = '👁️';
-        // Immediately recenter
-        if (state.currentUserLocation && state.fullscreenMap) {
-            state.fullscreenMap.setView(
-                [state.currentUserLocation.lat, state.currentUserLocation.lon],
-                state.fullscreenMap.getZoom(),
-                { animate: true }
-            );
+        btn.innerHTML = '🧭';
+        // Rotate to current heading
+        if (state.currentHeading) {
+            rotateMapToHeading(state.currentHeading);
         }
     } else {
         btn.classList.remove('active');
-        btn.textContent = '👁️‍🗨️';
+        btn.innerHTML = '🔺';
+        // Reset to north
+        const mapWrapper = document.getElementById('map-rotation-wrapper');
+        if (mapWrapper) {
+            mapWrapper.style.transform = 'rotate(0deg)';
+        }
     }
-}
-
-function toggleFollowMode() {
-    setFollowMode(!state.isFollowMode);
 }
 
 // ==========================================
@@ -499,7 +453,6 @@ function checkOffRoute(userLat, userLon) {
     if (!state.activeRouteCoords || state.activeRouteCoords.length < 2) return false;
     if (state.isRerouting) return false;
     
-    // Find minimum distance to route
     let minDist = Infinity;
     
     for (let i = 0; i < state.activeRouteCoords.length - 1; i++) {
@@ -514,8 +467,7 @@ function checkOffRoute(userLat, userLon) {
 }
 
 function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
-    // Convert to meters approximately
-    const toMeters = 111320; // degrees to meters at equator
+    const toMeters = 111320;
     
     px *= toMeters; py *= toMeters * Math.cos(px / toMeters * Math.PI / 180);
     x1 *= toMeters; y1 *= toMeters * Math.cos(x1 / toMeters * Math.PI / 180);
@@ -535,11 +487,9 @@ function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
     let xx, yy;
     
     if (param < 0) {
-        xx = x1;
-        yy = y1;
+        xx = x1; yy = y1;
     } else if (param > 1) {
-        xx = x2;
-        yy = y2;
+        xx = x2; yy = y2;
     } else {
         xx = x1 + param * C;
         yy = y1 + param * D;
@@ -552,7 +502,7 @@ function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
 }
 
 function getDistanceMeters(lat1, lon1, lat2, lon2) {
-    const R = 6371000; // Earth's radius in meters
+    const R = 6371000;
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
     const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
@@ -571,7 +521,6 @@ async function performReroute() {
     state.isRerouting = true;
     state.lastRerouteTime = now;
     
-    // Show rerouting UI
     document.getElementById('rerouting-toast').classList.remove('hidden');
     document.getElementById('off-route-warning').classList.add('hidden');
     
@@ -584,7 +533,6 @@ async function performReroute() {
             true
         );
         
-        // Update route on map
         if (state.fullscreenRouteLayer && state.fullscreenMap) {
             state.fullscreenMap.removeLayer(state.fullscreenRouteLayer);
         }
@@ -598,24 +546,20 @@ async function performReroute() {
             opacity: 0.9
         }).addTo(state.fullscreenMap);
         
-        // Update route data
         if (state.selectedRoute === 'shortest') {
             state.shortestRouteData = newRoute;
         } else {
             state.fastestRouteData = newRoute;
         }
         
-        // Update navigation info
         document.getElementById('nav-distance-remaining').textContent = `${newRoute.distance.toFixed(1)} mi`;
         document.getElementById('nav-time-remaining').textContent = `~${Math.round(newRoute.duration)} min`;
         
-        // Update first instruction
         if (newRoute.instructions && newRoute.instructions.length > 0) {
             state.currentStepIndex = 0;
             updateCurrentDirection(newRoute.instructions[0]);
         }
         
-        // Fetch new traffic data for new route
         fetchTrafficData(routeCoords);
         
         console.log('✓ Rerouted successfully');
@@ -651,34 +595,31 @@ async function startFullscreenNavigation() {
     state.isFollowMode = true;
     state.currentStepIndex = 0;
     
-    // Request wake lock to keep screen on
     await requestWakeLock();
     
-    // Show fullscreen overlay
     document.getElementById('fullscreen-nav').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
     
-    // Initialize fullscreen map
+    // Initialize fullscreen map with oversized container for rotation
     if (!state.fullscreenMap) {
         state.fullscreenMap = L.map('fullscreen-map', {
             zoomControl: false,
-            attributionControl: false,
-            rotate: true,
-            touchRotate: true
+            attributionControl: false
         }).setView([state.startCoords.lat, state.startCoords.lon], 17);
         
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19
         }).addTo(state.fullscreenMap);
-        
-        // Initialize rotation handling
-        initializeMapRotation(state.fullscreenMap);
     }
     
     // Clear previous route
     if (state.fullscreenRouteLayer) {
         state.fullscreenMap.removeLayer(state.fullscreenRouteLayer);
     }
+    
+    // Clear previous traffic markers
+    state.trafficMarkers.forEach(m => state.fullscreenMap.removeLayer(m));
+    state.trafficMarkers = [];
     
     // Draw route
     const routeCoords = decodePolyline(routeData.geometry);
@@ -709,7 +650,7 @@ async function startFullscreenNavigation() {
         updateCurrentDirection(routeData.instructions[0]);
     }
     
-    // Fetch traffic data (speed limits, stop signs)
+    // Fetch traffic data (speed limits, stop signs, traffic signals)
     fetchTrafficData(routeCoords);
     
     // Start GPS tracking
@@ -725,40 +666,35 @@ async function startFullscreenNavigation() {
     }, 1000);
     
     // Set follow mode button active
-    document.getElementById('toggle-follow-btn').classList.add('active');
+    document.getElementById('toggle-north-btn').classList.add('active');
 }
 
 async function exitFullscreenNavigation() {
     state.isNavigating = false;
     state.isFollowMode = false;
     
-    // Release wake lock
     await releaseWakeLock();
     
-    // Hide fullscreen overlay
     document.getElementById('fullscreen-nav').classList.add('hidden');
     document.body.style.overflow = '';
     
-    // Stop GPS tracking
     if (state.gpsWatchId) {
         navigator.geolocation.clearWatch(state.gpsWatchId);
         state.gpsWatchId = null;
     }
     
     // Clear traffic markers
-    state.speedLimitMarkers.forEach(m => {
+    state.trafficMarkers.forEach(m => {
         if (state.fullscreenMap) state.fullscreenMap.removeLayer(m);
     });
-    state.stopSignMarkers.forEach(m => {
-        if (state.fullscreenMap) state.fullscreenMap.removeLayer(m);
-    });
-    state.speedLimitMarkers = [];
-    state.stopSignMarkers = [];
+    state.trafficMarkers = [];
     
     // Reset rotation
-    resetMapRotation();
+    const mapWrapper = document.getElementById('map-rotation-wrapper');
+    if (mapWrapper) {
+        mapWrapper.style.transform = 'rotate(0deg)';
+    }
     
-    // Hide warnings
     hideOffRouteWarning();
     document.getElementById('rerouting-toast').classList.add('hidden');
 }
@@ -774,18 +710,23 @@ function startNavigationGPS() {
         (position) => {
             const { latitude, longitude, accuracy, speed, heading } = position.coords;
             state.currentUserLocation = { lat: latitude, lon: longitude };
-            state.currentSpeed = speed ? Math.round(speed * 2.23694) : 0; // m/s to mph
-            state.currentHeading = heading || 0;
+            state.currentSpeed = speed ? Math.round(speed * 2.23694) : 0;
+            
+            // Update heading if available
+            if (heading !== null && !isNaN(heading)) {
+                state.currentHeading = heading;
+                
+                // Auto-rotate map to user's heading (direction = up)
+                if (state.isFollowMode) {
+                    rotateMapToHeading(heading);
+                }
+            }
             
             // Update current speed display
             document.getElementById('current-speed').textContent = `${state.currentSpeed} mph`;
             
             // Update speed limit based on location
             updateCurrentSpeedLimit(latitude, longitude);
-            
-            // Check for upcoming stop signs
-            const upcomingStops = checkUpcomingStopSigns(latitude, longitude);
-            updateDirectionAlerts(upcomingStops);
             
             // Update marker position
             updateFullscreenUserLocation(latitude, longitude, accuracy);
@@ -820,20 +761,6 @@ function startNavigationGPS() {
     );
 }
 
-function updateDirectionAlerts(upcomingStops) {
-    const alertsEl = document.getElementById('direction-alerts');
-    
-    if (upcomingStops.length > 0) {
-        const nearest = upcomingStops[0];
-        const distText = nearest.distance < 100 
-            ? `${Math.round(nearest.distance)}m` 
-            : `${(nearest.distance / 1000).toFixed(1)}km`;
-        alertsEl.innerHTML = `<span class="stop-alert">🛑 Stop sign in ${distText}</span>`;
-    } else {
-        alertsEl.innerHTML = '';
-    }
-}
-
 function updateFullscreenUserLocation(lat, lng, accuracy) {
     if (!state.fullscreenMap) return;
     
@@ -851,25 +778,19 @@ function updateFullscreenUserLocation(lat, lng, accuracy) {
         }).addTo(state.fullscreenMap);
     }
     
-    // User marker with heading indicator
+    // User marker - arrow pointing UP (direction of travel)
     if (state.fullscreenUserMarker) {
         state.fullscreenUserMarker.setLatLng([lat, lng]);
     } else {
         state.fullscreenUserMarker = L.marker([lat, lng], {
             icon: L.divIcon({
                 className: 'nav-user-marker',
-                html: `<div class="nav-arrow"></div>`,
-                iconSize: [40, 40],
-                iconAnchor: [20, 20]
+                html: `<div class="nav-arrow-container"><div class="nav-arrow"></div></div>`,
+                iconSize: [50, 50],
+                iconAnchor: [25, 25]
             }),
             zIndexOffset: 1000
         }).addTo(state.fullscreenMap);
-    }
-    
-    // Rotate arrow based on heading
-    const arrow = document.querySelector('.nav-arrow');
-    if (arrow && state.currentHeading) {
-        arrow.style.transform = `rotate(${state.currentHeading}deg)`;
     }
 }
 
@@ -916,13 +837,20 @@ function updateCurrentDirection(step) {
 }
 
 function recenterFullscreenMap() {
-    setFollowMode(true);
+    state.isFollowMode = true;
+    document.getElementById('toggle-north-btn').classList.add('active');
+    
     if (state.currentUserLocation && state.fullscreenMap) {
         state.fullscreenMap.setView(
             [state.currentUserLocation.lat, state.currentUserLocation.lon],
             17,
             { animate: true }
         );
+        
+        // Rotate to current heading
+        if (state.currentHeading) {
+            rotateMapToHeading(state.currentHeading);
+        }
     }
 }
 
@@ -1122,7 +1050,6 @@ async function handleSearch() {
         
         addMarkers(start, end);
         
-        // Fetch routes
         const routes = await fetchMultipleRoutes(start, end, true);
         state.routesAnalyzed = routes.length;
         
@@ -1143,7 +1070,6 @@ async function handleSearch() {
         drawRoutes(state.shortestRouteData, state.fastestRouteData);
         displayResults(comparison);
         
-        // Fetch elevation data in background
         fetchBothElevations(start, end);
         
     } catch (error) {
@@ -1442,13 +1368,11 @@ function displayResults(comparison) {
     document.getElementById('fastest-distance').textContent = `${fastestRoute.distance.toFixed(2)} mi`;
     document.getElementById('fastest-duration').textContent = `~${Math.round(fastestRoute.duration)} min`;
     
-    // Update routes analyzed text
     document.getElementById('routes-analyzed').textContent = 
         `Analyzed ${state.routesAnalyzed} route strategies, showing best 2`;
     
     const card = document.getElementById('recommendation-card');
     
-    // Check minimum savings threshold
     if (milesSaved < minSavings) {
         card.className = 'recommendation-card info';
         card.innerHTML = `<div class="title">ℹ️ Savings Below Threshold</div><div class="subtitle">Only ${milesSaved.toFixed(2)} mi saved (threshold: ${minSavings} mi)</div>`;

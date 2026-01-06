@@ -20,11 +20,6 @@
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     
-    <!-- Leaflet Rotate CSS -->
-    <style>
-        .leaflet-container { touch-action: none; }
-    </style>
-    
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -245,7 +240,13 @@
 
     <!-- FULLSCREEN NAVIGATION OVERLAY -->
     <div id="fullscreen-nav" class="fullscreen-nav hidden">
-        <div id="fullscreen-map" class="fullscreen-map"></div>
+        <!-- Container that clips the oversized map -->
+        <div class="fullscreen-map-container">
+            <!-- Wrapper that rotates - oversized to prevent black corners -->
+            <div id="map-rotation-wrapper">
+                <div id="fullscreen-map"></div>
+            </div>
+        </div>
         
         <!-- Navigation Header -->
         <div class="nav-header">
@@ -253,6 +254,13 @@
             <div class="nav-status">
                 <span id="nav-distance-remaining">--</span>
                 <span id="nav-time-remaining">--</span>
+            </div>
+        </div>
+        
+        <!-- Compass Indicator (shows which way is North) -->
+        <div class="compass-container">
+            <div id="compass-indicator">
+                <span class="compass-needle">🔺</span>
             </div>
         </div>
         
@@ -270,15 +278,13 @@
             <div class="direction-info">
                 <div class="direction-text" id="nav-direction-text">Start navigation</div>
                 <div class="direction-distance" id="nav-direction-distance">--</div>
-                <div class="direction-alerts" id="direction-alerts"></div>
             </div>
         </div>
         
         <!-- Map Controls -->
         <div class="nav-controls">
             <button id="fullscreen-recenter-btn" class="fullscreen-recenter-btn" title="Re-center on my location">🎯</button>
-            <button id="rotate-north-btn" class="nav-control-btn" title="Reset to North">🧭</button>
-            <button id="toggle-follow-btn" class="nav-control-btn active" title="Toggle follow mode">👁️</button>
+            <button id="toggle-north-btn" class="nav-control-btn active" title="Toggle heading/north-up">🧭</button>
         </div>
         
         <!-- Rerouting Notification -->
@@ -300,7 +306,7 @@
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register('service-worker.js')
-                    .catch(err => console.log('SW failed'));
+                    .catch(err => console.log('SW registration failed'));
             });
         }
     </script>
