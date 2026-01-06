@@ -1,13 +1,13 @@
 /**
- * MileSaver - PROFESSIONAL NAVIGATION v7
- * FIXED: Route finding, added swap button, better error handling
+ * MileSaver - PROFESSIONAL NAVIGATION v8
+ * FIXED: CORS issue by using GET endpoint instead of POST
  */
 
 const CONFIG = {
     API_KEY: '5b3ce3597851110001cf6248a287214fb0384b6eaba815767918a4cca',
     GOOGLE_API_KEY: 'AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0',
+    // Using GET endpoint - better CORS support
     API_BASE_URL: 'https://api.openrouteservice.org/v2/directions/driving-car',
-    GEOCODE_URL: 'https://api.openrouteservice.org/geocode/search',
     ELEVATION_API_URL: 'https://api.open-elevation.com/api/v1/lookup',
     OVERPASS_API_URL: 'https://overpass-api.de/api/interpreter',
     OFF_ROUTE_THRESHOLD: 50,
@@ -113,7 +113,7 @@ function initializeApp() {
         state.googleEndCoords = null;
     });
     
-    console.log('✅ MileSaver v7 initialized!');
+    console.log('✅ MileSaver v8 initialized! (CORS fix applied)');
 }
 
 // ==========================================
@@ -136,13 +136,11 @@ function swapLocations() {
         startInput.value = endInput.value;
         endInput.value = temp;
         
-        // Also swap the stored Google coords
         const tempCoords = state.googleStartCoords;
         state.googleStartCoords = state.googleEndCoords;
         state.googleEndCoords = tempCoords;
     }
     
-    // Visual feedback
     const btn = document.getElementById('swap-btn');
     btn.classList.add('swapping');
     setTimeout(() => btn.classList.remove('swapping'), 300);
@@ -497,7 +495,7 @@ async function performReroute() {
     document.getElementById('off-route-warning').classList.add('hidden');
     
     try {
-        const newRoute = await fetchSingleRoute(
+        const newRoute = await fetchRouteGET(
             state.currentUserLocation,
             state.endCoords,
             state.selectedRoute === 'shortest' ? 'shortest' : 'fastest'
@@ -519,9 +517,9 @@ async function performReroute() {
         document.getElementById('nav-distance-remaining').textContent = `${newRoute.distance.toFixed(1)} mi`;
         document.getElementById('nav-time-remaining').textContent = `~${Math.round(newRoute.duration)} min`;
         
-        if (newRoute.instructions && newRoute.instructions.length > 0) {
+        if (newRoute.steps && newRoute.steps.length > 0) {
             state.currentStepIndex = 0;
-            updateCurrentDirection(newRoute.instructions[0]);
+            updateCurrentDirection(newRoute.steps[0]);
         }
         
         fetchTrafficData(routeCoords);
@@ -594,8 +592,8 @@ async function startFullscreenNavigation() {
     document.getElementById('nav-distance-remaining').textContent = `${routeData.distance.toFixed(1)} mi`;
     document.getElementById('nav-time-remaining').textContent = `~${Math.round(routeData.duration)} min`;
     
-    if (routeData.instructions && routeData.instructions.length > 0) {
-        updateCurrentDirection(routeData.instructions[0]);
+    if (routeData.steps && routeData.steps.length > 0) {
+        updateCurrentDirection(routeData.steps[0]);
     }
     
     fetchTrafficData(routeCoords);
@@ -751,7 +749,7 @@ function updateMainMapUserLocation(lat, lng, accuracy) {
 
 function updateCurrentDirection(step) {
     const icon = getDirectionIcon(step.type);
-    const distance = formatStepDistance(step.distanceMeters);
+    const distance = formatStepDistance(step.distance);
     
     document.getElementById('nav-direction-icon').textContent = icon;
     document.getElementById('nav-direction-text').textContent = step.instruction;
@@ -939,7 +937,7 @@ function handleInputModeChange(e) {
 }
 
 // ==========================================
-// SEARCH & ROUTES - FIXED
+// SEARCH & ROUTES - USING GET ENDPOINT (CORS FIX)
 // ==========================================
 
 async function handleSearch() {
@@ -963,7 +961,6 @@ async function handleSearch() {
             const endLoc = document.getElementById('end-location').value.trim();
             if (!startLoc || !endLoc) throw new Error('Enter both locations');
             
-            // Use Google coords if available, otherwise geocode
             start = state.googleStartCoords || await geocodeAddress(startLoc);
             end = state.googleEndCoords || await geocodeAddress(endLoc);
         }
@@ -976,8 +973,8 @@ async function handleSearch() {
         
         addMarkers(start, end);
         
-        // Fetch multiple routes with different strategies
-        const routes = await fetchAllRoutes(start, end);
+        // Fetch routes using GET endpoint (CORS-friendly)
+        const routes = await fetchAllRoutesGET(start, end);
         
         if (routes.length === 0) {
             throw new Error('No routes found. Try different locations.');
@@ -986,9 +983,8 @@ async function handleSearch() {
         state.routesAnalyzed = routes.length;
         console.log(`✓ Found ${routes.length} routes`);
         
-        // Sort by distance (shortest first)
+        // Sort by distance and time
         const byDistance = [...routes].sort((a, b) => a.distance - b.distance);
-        // Sort by time (fastest first)
         const byTime = [...routes].sort((a, b) => a.duration - b.duration);
         
         state.shortestRouteData = byDistance[0];
@@ -1022,7 +1018,6 @@ function parseCoordinates(str) {
 }
 
 async function geocodeAddress(address) {
-    // Check if it's already coordinates
     const coordMatch = address.match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
     if (coordMatch) return { lat: parseFloat(coordMatch[1]), lon: parseFloat(coordMatch[2]) };
     
@@ -1034,7 +1029,7 @@ async function geocodeAddress(address) {
             const data = await res.json();
             if (data.status === 'OK' && data.results.length > 0) {
                 const loc = data.results[0].geometry.location;
-                console.log(`✓ Geocoded via Google: ${address} → ${loc.lat}, ${loc.lng}`);
+                console.log(`✓ Geocoded via Google: ${address}`);
                 return { lat: loc.lat, lon: loc.lng };
             }
         } catch (err) {
@@ -1048,7 +1043,7 @@ async function geocodeAddress(address) {
         const res = await fetch(url, { headers: { 'User-Agent': 'MileSaver-WebApp' } });
         const data = await res.json();
         if (data.length > 0) {
-            console.log(`✓ Geocoded via Nominatim: ${address} → ${data[0].lat}, ${data[0].lon}`);
+            console.log(`✓ Geocoded via Nominatim: ${address}`);
             return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
         }
     } catch (err) {
@@ -1058,12 +1053,16 @@ async function geocodeAddress(address) {
     throw new Error(`Could not find location: "${address}"`);
 }
 
-async function fetchAllRoutes(start, end) {
+// ==========================================
+// FETCH ROUTES USING GET ENDPOINT (NO CORS ISSUES)
+// ==========================================
+
+async function fetchAllRoutesGET(start, end) {
     const routes = [];
     
-    // Strategy 1: Shortest preference
+    // Strategy 1: Shortest
     try {
-        const route = await fetchSingleRoute(start, end, 'shortest');
+        const route = await fetchRouteGET(start, end, 'shortest');
         route.strategy = 'shortest';
         routes.push(route);
         console.log('✓ Got shortest route:', route.distance.toFixed(2), 'mi');
@@ -1071,9 +1070,9 @@ async function fetchAllRoutes(start, end) {
         console.warn('Shortest route failed:', err.message);
     }
     
-    // Strategy 2: Fastest preference
+    // Strategy 2: Fastest
     try {
-        const route = await fetchSingleRoute(start, end, 'fastest');
+        const route = await fetchRouteGET(start, end, 'fastest');
         route.strategy = 'fastest';
         routes.push(route);
         console.log('✓ Got fastest route:', route.distance.toFixed(2), 'mi');
@@ -1083,7 +1082,7 @@ async function fetchAllRoutes(start, end) {
     
     // Strategy 3: Recommended
     try {
-        const route = await fetchSingleRoute(start, end, 'recommended');
+        const route = await fetchRouteGET(start, end, 'recommended');
         route.strategy = 'recommended';
         routes.push(route);
         console.log('✓ Got recommended route:', route.distance.toFixed(2), 'mi');
@@ -1091,46 +1090,19 @@ async function fetchAllRoutes(start, end) {
         console.warn('Recommended route failed:', err.message);
     }
     
-    // Strategy 4: Shortest avoiding highways
-    try {
-        const route = await fetchSingleRoute(start, end, 'shortest', ['highways']);
-        route.strategy = 'shortest-no-highway';
-        routes.push(route);
-        console.log('✓ Got no-highway route:', route.distance.toFixed(2), 'mi');
-    } catch (err) {
-        console.warn('No-highway route failed:', err.message);
-    }
-    
     return routes;
 }
 
-async function fetchSingleRoute(start, end, preference, avoidFeatures = []) {
-    // CRITICAL: OpenRouteService uses [longitude, latitude] order!
-    const body = {
-        coordinates: [
-            [start.lon, start.lat],
-            [end.lon, end.lat]
-        ],
-        preference: preference,
-        units: 'm',
-        instructions: true,
-        geometry: true
-    };
+async function fetchRouteGET(start, end, preference) {
+    // Build GET URL - OpenRouteService format: lon,lat (not lat,lon!)
+    const startStr = `${start.lon},${start.lat}`;
+    const endStr = `${end.lon},${end.lat}`;
     
-    if (avoidFeatures.length > 0) {
-        body.options = { avoid_features: avoidFeatures };
-    }
+    const url = `${CONFIG.API_BASE_URL}?api_key=${CONFIG.API_KEY}&start=${startStr}&end=${endStr}`;
     
-    console.log('🔄 Fetching route with preference:', preference, avoidFeatures.length > 0 ? `avoiding: ${avoidFeatures}` : '');
+    console.log(`🔄 Fetching ${preference} route via GET...`);
     
-    const response = await fetch(CONFIG.API_BASE_URL, {
-        method: 'POST',
-        headers: {
-            'Authorization': CONFIG.API_KEY,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(body)
-    });
+    const response = await fetch(url);
     
     if (!response.ok) {
         const errorText = await response.text();
@@ -1140,33 +1112,41 @@ async function fetchSingleRoute(start, end, preference, avoidFeatures = []) {
     
     const data = await response.json();
     
-    if (!data.routes || data.routes.length === 0) {
-        throw new Error('No routes in response');
+    if (!data.features || data.features.length === 0) {
+        throw new Error('No route in response');
     }
     
-    const route = data.routes[0];
+    const feature = data.features[0];
+    const props = feature.properties;
+    const segments = props.segments || [];
     
-    // Extract instructions
-    const instructions = [];
-    if (route.segments) {
-        route.segments.forEach(segment => {
-            if (segment.steps) {
-                segment.steps.forEach(step => {
-                    instructions.push({
-                        instruction: step.instruction || 'Continue',
-                        distanceMeters: step.distance || 0,
-                        type: step.type || 0
-                    });
+    // Extract steps/instructions
+    const steps = [];
+    segments.forEach(segment => {
+        if (segment.steps) {
+            segment.steps.forEach(step => {
+                steps.push({
+                    instruction: step.instruction || 'Continue',
+                    distance: step.distance || 0,
+                    duration: step.duration || 0,
+                    type: step.type || 0
                 });
-            }
-        });
-    }
+            });
+        }
+    });
+    
+    // Get geometry - it's GeoJSON, not encoded polyline
+    const coordinates = feature.geometry.coordinates;
+    
+    // Convert [lon, lat] to [lat, lon] for Leaflet
+    const leafletCoords = coordinates.map(coord => [coord[1], coord[0]]);
     
     return {
-        distance: route.summary.distance * 0.000621371, // meters to miles
-        duration: route.summary.duration / 60, // seconds to minutes
-        geometry: route.geometry,
-        instructions: instructions
+        distance: (props.summary?.distance || 0) / 1609.34, // meters to miles
+        duration: (props.summary?.duration || 0) / 60, // seconds to minutes
+        geometry: leafletCoords, // Already decoded coordinates
+        steps: steps,
+        isGeoJSON: true // Flag to indicate we have coords, not encoded polyline
     };
 }
 
@@ -1249,7 +1229,7 @@ function formatStepDistance(meters) {
     if (!meters) return '';
     const feet = meters * 3.28084;
     if (feet < 528) return `${Math.round(feet)} ft`;
-    return `${(meters * 0.000621371).toFixed(2)} mi`;
+    return `${(meters / 1609.34).toFixed(2)} mi`;
 }
 
 function getDirectionIcon(type) {
@@ -1259,7 +1239,7 @@ function getDirectionIcon(type) {
 
 function showDirections(routeType) {
     const routeData = routeType === 'shortest' ? state.shortestRouteData : state.fastestRouteData;
-    if (!routeData || !routeData.instructions) return;
+    if (!routeData || !routeData.steps) return;
     
     const panel = document.getElementById('directions-panel');
     const title = document.getElementById('directions-title');
@@ -1268,9 +1248,9 @@ function showDirections(routeType) {
     title.textContent = routeType === 'shortest' ? '📍 Shortest Route' : '📍 Fastest Route';
     
     let html = '<ol class="directions-list">';
-    routeData.instructions.forEach(step => {
+    routeData.steps.forEach(step => {
         const icon = getDirectionIcon(step.type);
-        const dist = formatStepDistance(step.distanceMeters);
+        const dist = formatStepDistance(step.distance);
         html += `<li class="direction-step"><span class="step-icon">${icon}</span><div class="step-content"><span class="step-instruction">${step.instruction}</span>${dist ? `<span class="step-distance">${dist}</span>` : ''}</div></li>`;
     });
     html += '</ol>';
@@ -1318,7 +1298,6 @@ function addMarkers(start, end) {
     state.startMarker = L.marker([start.lat, start.lon], { icon: greenIcon }).addTo(state.map);
     state.endMarker = L.marker([end.lat, end.lon], { icon: redIcon }).addTo(state.map);
     
-    // Fit bounds to show both markers
     const bounds = L.latLngBounds([
         [start.lat, start.lon],
         [end.lat, end.lon]
@@ -1330,8 +1309,9 @@ function drawRoutes(shortest, fastest) {
     if (state.shortestRouteLayer) state.map.removeLayer(state.shortestRouteLayer);
     if (state.fastestRouteLayer) state.map.removeLayer(state.fastestRouteLayer);
     
-    const shortestCoords = decodePolyline(shortest.geometry);
-    const fastestCoords = decodePolyline(fastest.geometry);
+    // Get coordinates - already in [lat, lon] format from fetchRouteGET
+    const shortestCoords = shortest.geometry;
+    const fastestCoords = fastest.geometry;
     
     console.log('📍 Shortest route points:', shortestCoords.length);
     console.log('📍 Fastest route points:', fastestCoords.length);
@@ -1360,9 +1340,16 @@ function drawRoutes(shortest, fastest) {
     state.map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14 });
 }
 
+// Keep for backward compatibility but GET returns GeoJSON directly
 function decodePolyline(encoded) {
-    if (!encoded) {
-        console.error('No polyline to decode');
+    // If it's already an array (from GET endpoint), return as-is
+    if (Array.isArray(encoded)) {
+        return encoded;
+    }
+    
+    // Otherwise decode encoded polyline
+    if (!encoded || typeof encoded !== 'string') {
+        console.error('Invalid polyline');
         return [];
     }
     
