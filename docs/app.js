@@ -17,7 +17,7 @@
 const CONFIG = {
   // Cloudflare Worker proxy for OpenRouteService (avoids CORS + hides API key)
   // Example: 'https://milesaver-ors-proxy.<your-subdomain>.workers.dev'
-  ORS_PROXY_URL: '',
+  ORS_PROXY_URL: 'https://milesaver-ors-proxy.teja-katakam.workers.dev',
 
     // GraphHopper - supports shortest distance routing + CORS friendly
     GRAPHHOPPER_URL: 'https://graphhopper.com/api/1/route',
