@@ -17,7 +17,7 @@
 const CONFIG = {
     // GraphHopper - supports shortest distance routing + CORS friendly
     GRAPHHOPPER_URL: 'https://graphhopper.com/api/1/route',
-    GRAPHHOPPER_KEY: '2511f66d-11d1-4b14-804a-57977321e912', // Free tier key
+    GRAPHHOPPER_KEY: '9c720b11-9ba5-4597-b5aa-a8e49a940287', // Free tier key
     
     // Fallback to OSRM
     OSRM_URL: 'https://router.project-osrm.org/route/v1/driving',
