@@ -32,7 +32,7 @@ const CONFIG = {
     REROUTE_COOLDOWN: 15000,
 
     // Routing quality controls
-    ENABLE_MULTI_CANDIDATE_SHORTEST: true,
+    ENABLE_MULTI_CANDIDATE_SHORTEST: false,
     GH_ALT_MAX_PATHS: 5,
     GH_ALT_MAX_WEIGHT_FACTOR: 2.0,
     GH_ALT_MAX_SHARE_FACTOR: 0.6,
@@ -43,7 +43,6 @@ const CONFIG = {
 
 const state = {
     map: null,
-    graphhopperDisabled: false, // set true on 401/403 to fail-fast for session
     fullscreenMap: null,
     startMarker: null,
     endMarker: null,
@@ -436,7 +435,7 @@ async function handleSearch() {
         // Fetch BOTH shortest (by distance) and fastest (by time) routes
         const [shortestRoute, fastestRoute] = await Promise.all([
             fetchGraphHopperRoute(start, end, 'shortest'),      // True distance-minimizing route
-            fetchGraphHopperRoute(start, end, 'fastest')        // Prioritize time
+            fetchOSRMRoute(start, end)                          // Time-optimized (OSRM)
         ]);
         
         state.shortestRouteData = shortestRoute;
@@ -477,7 +476,7 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest', options 
     const url = new URL(CONFIG.GRAPHHOPPER_URL);
     url.searchParams.set('point', `${start.lat},${start.lon}`);
     url.searchParams.append('point', `${end.lat},${end.lon}`);
-    url.searchParams.set('vehicle', 'car');
+    url.searchParams.set('profile', 'car');
     url.searchParams.set('weighting', weighting);
     
     // Multi-candidate shortest (v1–v6 style): ask for multiple alternatives, then pick the minimum-distance path.
@@ -485,7 +484,7 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest', options 
     const wantsMultiCandidate = (weighting === 'shortest' && CONFIG.ENABLE_MULTI_CANDIDATE_SHORTEST && !options.forceSinglePath);
     if (wantsMultiCandidate) {
         url.searchParams.set('algorithm', 'alternative_route');
-        url.searchParams.set('ch.disable', 'true'); // improves alt-route availability
+        url.searchParams.set('ch.disable', 'true');
         url.searchParams.set('alternative_route.max_paths', String(CONFIG.GH_ALT_MAX_PATHS));
         url.searchParams.set('alternative_route.max_weight_factor', String(CONFIG.GH_ALT_MAX_WEIGHT_FACTOR));
         url.searchParams.set('alternative_route.max_share_factor', String(CONFIG.GH_ALT_MAX_SHARE_FACTOR));
@@ -494,22 +493,12 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest', options 
     url.searchParams.set('points_encoded', 'false');
     url.searchParams.set('key', CONFIG.GRAPHHOPPER_KEY);
     
-    if (state.graphhopperDisabled) {
-        const osrm = await fetchOSRMRoute(start, end);
-        return { ...osrm, engine: 'osrm', isFallback: true, requestedWeighting: weighting, candidateCount: 1, fallbackReason: 'graphhopper_disabled' };
-    }
-
     console.log(`🔄 Fetching ${weighting} route from GraphHopper...`);
     
     try {
         const response = await fetch(url);
         
         if (!response.ok) {
-            if (response.status === 401 || response.status === 403) {
-                console.warn(`GraphHopper auth failed (${response.status}); disabling GraphHopper for this session`);
-                state.graphhopperDisabled = true;
-            }
-
             // If alternative_route params are rejected, retry once without them before falling back.
             if (wantsMultiCandidate) {
                 console.warn('GraphHopper rejected alternative_route params; retrying shortest without multi-candidate options');
@@ -517,7 +506,7 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest', options 
             }
             console.warn('GraphHopper failed, falling back to OSRM');
             const osrm = await fetchOSRMRoute(start, end);
-            return { ...osrm, engine: 'osrm', isFallback: true, requestedWeighting: weighting, candidateCount: 1, fallbackReason: 'graphhopper_error' };
+            return { ...osrm, engine: 'osrm', isFallback: true, requestedWeighting: weighting, candidateCount: 1 };
         }
         
         const data = await response.json();
@@ -565,7 +554,7 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest', options 
     } catch (err) {
         console.warn('GraphHopper error:', err.message, '- falling back to OSRM');
         const osrm = await fetchOSRMRoute(start, end);
-        return { ...osrm, engine: 'osrm', isFallback: true, requestedWeighting: weighting, candidateCount: 1, fallbackReason: 'graphhopper_error' };
+        return { ...osrm, engine: 'osrm', isFallback: true, requestedWeighting: weighting, candidateCount: 1 };
     }
 }
 
@@ -866,20 +855,24 @@ function drawRoutes(shortest, fastest) {
     
     // Draw fastest first (if meaningfully different)
     const distDiff = Math.abs(fastest.distance - shortest.distance);
-    if (distDiff > 0.1) {
+    if (distDiff > 0.05) {
+        // Draw fastest first (dashed red), then shortest (solid blue) above it.
         state.fastestRouteLayer = L.polyline(fastest.geometry, {
             color: '#dc2626',
-            weight: 6,
-            opacity: 0.7,
-            dashArray: '10, 10'
+            weight: 7,
+            opacity: 0.9,
+            dashArray: '12, 10'
         }).addTo(state.map);
+    } else {
+        // If routes are effectively identical, we do not draw two coincident lines (it reads as a bug).
+        state.fastestRouteLayer = null;
     }
-    
-    // Draw shortest on top
+
+    // Draw shortest (always)
     state.shortestRouteLayer = L.polyline(shortest.geometry, {
         color: '#2563eb',
-        weight: 6,
-        opacity: 0.9
+        weight: 7,
+        opacity: 0.95
     }).addTo(state.map);
     
     document.getElementById('map-legend').classList.remove('hidden');
