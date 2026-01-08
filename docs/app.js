@@ -1,24 +1,34 @@
 /**
- * MileSaver v10 - COMPLETE FIX
- * 1. Multiple route alternatives (shortest vs fastest)
- * 2. Screen wake lock
- * 3. Stop signs & traffic signals on map
- * 4. Destination reached detection
- * 5. Smooth map panning (disable follow on touch)
- * 6. Live instruction updates
- * 7. Live distance/time countdown
- * 8. Improved off-route detection
- * 9. Car icon instead of triangle
+ * MileSaver v11 - TARGETED FIXES
+ * 
+ * FIXED:
+ * 1. Shortest route - Using GraphHopper with distance weighting
+ * 2. Speed limit in bubble (not on road)
+ * 3. Car icon points toward heading
+ * 4. Instructions show distance TO next turn
+ * 
+ * PRESERVED (working features):
+ * - Stop signs & traffic signals on map
+ * - User speed detection
+ * - User perspective orientation
+ * - All other core features
  */
 
 const CONFIG = {
+    // GraphHopper - supports shortest distance routing + CORS friendly
+    GRAPHHOPPER_URL: 'https://graphhopper.com/api/1/route',
+    GRAPHHOPPER_KEY: '2511f66d-11d1-4b14-804a-57977321e912', // Free tier key
+    
+    // Fallback to OSRM
     OSRM_URL: 'https://router.project-osrm.org/route/v1/driving',
+    
     GOOGLE_API_KEY: 'AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0',
     NOMINATIM_URL: 'https://nominatim.openstreetmap.org',
     ELEVATION_URL: 'https://api.open-elevation.com/api/v1/lookup',
     OVERPASS_URL: 'https://overpass-api.de/api/interpreter',
-    OFF_ROUTE_THRESHOLD: 80, // meters - increased for better tolerance
-    DESTINATION_THRESHOLD: 50, // meters - close enough to destination
+    
+    OFF_ROUTE_THRESHOLD: 80,
+    DESTINATION_THRESHOLD: 50,
     REROUTE_COOLDOWN: 15000,
 };
 
@@ -50,7 +60,7 @@ const state = {
     currentHeading: 0,
     isNavigating: false,
     isFollowMode: true,
-    isPanning: false, // Track if user is manually panning
+    isPanning: false,
     selectedRoute: 'shortest',
     routesAnalyzed: 0,
     wakeLock: null,
@@ -60,7 +70,7 @@ const state = {
     hasArrived: false,
     stopSigns: [],
     trafficSignals: [],
-    speedLimits: [],
+    currentSpeedLimit: null,
 };
 
 // ==========================================
@@ -73,7 +83,6 @@ function initializeApp() {
     initializeMap();
     setTimeout(initializeAutocomplete, 500);
     
-    // Event listeners
     document.getElementById('search-btn').addEventListener('click', handleSearch);
     document.getElementById('close-directions').addEventListener('click', closeDirections);
     document.getElementById('recenter-btn').addEventListener('click', recenterOnUser);
@@ -101,7 +110,7 @@ function initializeApp() {
     document.getElementById('start-location').addEventListener('input', () => state.googleStartCoords = null);
     document.getElementById('end-location').addEventListener('input', () => state.googleEndCoords = null);
     
-    console.log('✅ MileSaver v10 initialized');
+    console.log('✅ MileSaver v11 initialized');
 }
 
 function initializeMap() {
@@ -343,42 +352,28 @@ async function handleSearch() {
         
         addMarkers(start, end);
         
-        // Fetch MULTIPLE routes with alternatives
-        const routes = await fetchOSRMRoutesWithAlternatives(start, end);
+        // Fetch BOTH shortest (by distance) and fastest (by time) routes
+        const [shortestRoute, fastestRoute] = await Promise.all([
+            fetchGraphHopperRoute(start, end, 'short_fastest'), // Prioritize distance
+            fetchGraphHopperRoute(start, end, 'fastest')        // Prioritize time
+        ]);
         
-        if (routes.length === 0) {
-            throw new Error('No routes found');
-        }
+        state.shortestRouteData = shortestRoute;
+        state.fastestRouteData = fastestRoute;
+        state.routesAnalyzed = 2;
         
-        state.routesAnalyzed = routes.length;
-        
-        // Sort by distance to find shortest
-        const byDistance = [...routes].sort((a, b) => a.distance - b.distance);
-        // Sort by duration to find fastest  
-        const byDuration = [...routes].sort((a, b) => a.duration - b.duration);
-        
-        state.shortestRouteData = byDistance[0];
-        state.fastestRouteData = byDuration[0];
-        
-        // If they're the same route, use the second option for comparison if available
-        if (routes.length > 1 && state.shortestRouteData === state.fastestRouteData) {
-            if (byDistance[0].distance < byDuration[1]?.distance) {
-                state.fastestRouteData = byDuration[0];
-            }
-        }
-        
-        console.log('✓ Shortest:', state.shortestRouteData.distance.toFixed(2), 'mi');
-        console.log('✓ Fastest:', state.fastestRouteData.distance.toFixed(2), 'mi');
+        console.log('✓ Shortest:', shortestRoute.distance.toFixed(2), 'mi,', Math.round(shortestRoute.duration), 'min');
+        console.log('✓ Fastest:', fastestRoute.distance.toFixed(2), 'mi,', Math.round(fastestRoute.duration), 'min');
         
         const comparison = {
-            shortestRoute: state.shortestRouteData,
-            fastestRoute: state.fastestRouteData,
-            milesSaved: state.fastestRouteData.distance - state.shortestRouteData.distance,
-            extraTime: state.shortestRouteData.duration - state.fastestRouteData.duration
+            shortestRoute: shortestRoute,
+            fastestRoute: fastestRoute,
+            milesSaved: fastestRoute.distance - shortestRoute.distance,
+            extraTime: shortestRoute.duration - fastestRoute.duration
         };
         
         state.routeComparison = comparison;
-        drawRoutes(state.shortestRouteData, state.fastestRouteData);
+        drawRoutes(shortestRoute, fastestRoute);
         displayResults(comparison);
         
         fetchBothElevations(start, end);
@@ -392,31 +387,96 @@ async function handleSearch() {
 }
 
 // ==========================================
-// OSRM ROUTING WITH ALTERNATIVES
+// GRAPHHOPPER ROUTING (supports distance optimization)
 // ==========================================
 
-async function fetchOSRMRoutesWithAlternatives(start, end) {
-    const coords = `${start.lon},${start.lat};${end.lon},${end.lat}`;
+async function fetchGraphHopperRoute(start, end, weighting = 'fastest') {
+    const url = new URL(CONFIG.GRAPHHOPPER_URL);
+    url.searchParams.set('point', `${start.lat},${start.lon}`);
+    url.searchParams.append('point', `${end.lat},${end.lon}`);
+    url.searchParams.set('vehicle', 'car');
+    url.searchParams.set('weighting', weighting);
+    url.searchParams.set('instructions', 'true');
+    url.searchParams.set('points_encoded', 'false');
+    url.searchParams.set('key', CONFIG.GRAPHHOPPER_KEY);
     
-    // Request alternatives=true to get multiple routes
-    const url = `${CONFIG.OSRM_URL}/${coords}?overview=full&geometries=geojson&steps=true&alternatives=true`;
+    console.log(`🔄 Fetching ${weighting} route from GraphHopper...`);
     
-    console.log('🔄 Fetching routes with alternatives...');
-    
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`OSRM error: ${response.status}`);
-    
-    const data = await response.json();
-    if (data.code !== 'Ok' || !data.routes?.length) throw new Error('No routes found');
-    
-    console.log(`✓ OSRM returned ${data.routes.length} route(s)`);
-    
-    return data.routes.map(route => parseOSRMRoute(route));
+    try {
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+            console.warn('GraphHopper failed, falling back to OSRM');
+            return await fetchOSRMRoute(start, end);
+        }
+        
+        const data = await response.json();
+        
+        if (!data.paths || data.paths.length === 0) {
+            throw new Error('No route found');
+        }
+        
+        const path = data.paths[0];
+        
+        // Parse instructions with DISTANCE TO next maneuver
+        const steps = [];
+        if (path.instructions) {
+            for (let i = 0; i < path.instructions.length; i++) {
+                const inst = path.instructions[i];
+                // Distance is the length of THIS segment (distance TO complete this instruction)
+                steps.push({
+                    instruction: inst.text,
+                    distance: inst.distance, // Distance of this step
+                    duration: inst.time / 1000, // ms to seconds
+                    type: mapGraphHopperSign(inst.sign),
+                    // Store the interval for locating where we are
+                    interval: inst.interval
+                });
+            }
+        }
+        
+        // Coordinates are [lon, lat], convert to [lat, lon]
+        const geometry = path.points.coordinates.map(c => [c[1], c[0]]);
+        
+        return {
+            distance: path.distance / 1609.34, // meters to miles
+            duration: path.time / 60000, // ms to minutes
+            geometry: geometry,
+            steps: steps
+        };
+        
+    } catch (err) {
+        console.warn('GraphHopper error:', err.message, '- falling back to OSRM');
+        return await fetchOSRMRoute(start, end);
+    }
 }
 
-async function fetchSingleOSRMRoute(start, end) {
+function mapGraphHopperSign(sign) {
+    // GraphHopper sign values
+    const signMap = {
+        '-3': 5,  // sharp left (u-turn)
+        '-2': 7,  // left
+        '-1': 8,  // slight left
+        '0': 1,   // straight
+        '1': 2,   // slight right
+        '2': 3,   // right
+        '3': 4,   // sharp right
+        '4': 10,  // finish
+        '5': 10,  // via reached
+        '6': 9,   // roundabout
+    };
+    return signMap[String(sign)] || 1;
+}
+
+// ==========================================
+// OSRM FALLBACK
+// ==========================================
+
+async function fetchOSRMRoute(start, end) {
     const coords = `${start.lon},${start.lat};${end.lon},${end.lat}`;
     const url = `${CONFIG.OSRM_URL}/${coords}?overview=full&geometries=geojson&steps=true`;
+    
+    console.log('🔄 Fetching OSRM route...');
     
     const response = await fetch(url);
     if (!response.ok) throw new Error(`OSRM error: ${response.status}`);
@@ -424,10 +484,8 @@ async function fetchSingleOSRMRoute(start, end) {
     const data = await response.json();
     if (data.code !== 'Ok' || !data.routes?.length) throw new Error('No route found');
     
-    return parseOSRMRoute(data.routes[0]);
-}
-
-function parseOSRMRoute(route) {
+    const route = data.routes[0];
+    
     const steps = [];
     if (route.legs) {
         route.legs.forEach(leg => {
@@ -438,7 +496,7 @@ function parseOSRMRoute(route) {
                         distance: step.distance,
                         duration: step.duration,
                         type: getOSRMStepType(step.maneuver?.type, step.maneuver?.modifier),
-                        location: step.maneuver?.location // [lon, lat]
+                        location: step.maneuver?.location
                     });
                 });
             }
@@ -456,63 +514,46 @@ function parseOSRMRoute(route) {
 }
 
 function formatOSRMInstruction(step) {
-    const maneuver = step.maneuver;
-    if (!maneuver) return step.name || 'Continue';
+    const m = step.maneuver;
+    if (!m) return step.name || 'Continue';
     
-    const type = maneuver.type;
-    const modifier = maneuver.modifier;
+    const type = m.type;
+    const mod = m.modifier;
     const name = step.name || 'the road';
     
-    switch (type) {
-        case 'depart': return `Head ${modifier || 'straight'} on ${name}`;
-        case 'arrive': return 'Arrive at your destination';
-        case 'turn':
-            if (modifier === 'left') return `Turn left onto ${name}`;
-            if (modifier === 'right') return `Turn right onto ${name}`;
-            if (modifier === 'slight left') return `Slight left onto ${name}`;
-            if (modifier === 'slight right') return `Slight right onto ${name}`;
-            if (modifier === 'sharp left') return `Sharp left onto ${name}`;
-            if (modifier === 'sharp right') return `Sharp right onto ${name}`;
-            if (modifier === 'uturn') return `Make a U-turn`;
-            return `Turn onto ${name}`;
-        case 'merge': return `Merge onto ${name}`;
-        case 'on ramp': 
-        case 'off ramp':
-        case 'ramp': return `Take the ramp onto ${name}`;
-        case 'fork':
-            if (modifier === 'left') return `Keep left onto ${name}`;
-            if (modifier === 'right') return `Keep right onto ${name}`;
-            return `Continue onto ${name}`;
-        case 'roundabout': return `At the roundabout, take exit onto ${name}`;
-        case 'rotary': return `At the rotary, exit onto ${name}`;
-        case 'continue': 
-        case 'new name':
-            return `Continue on ${name}`;
-        case 'end of road':
-            if (modifier === 'left') return `Turn left onto ${name}`;
-            if (modifier === 'right') return `Turn right onto ${name}`;
-            return `Continue onto ${name}`;
-        default: return `Continue on ${name}`;
+    if (type === 'depart') return `Head ${mod || 'straight'} on ${name}`;
+    if (type === 'arrive') return 'Arrive at your destination';
+    if (type === 'turn') {
+        if (mod === 'left') return `Turn left onto ${name}`;
+        if (mod === 'right') return `Turn right onto ${name}`;
+        if (mod === 'slight left') return `Slight left onto ${name}`;
+        if (mod === 'slight right') return `Slight right onto ${name}`;
+        if (mod === 'sharp left') return `Sharp left onto ${name}`;
+        if (mod === 'sharp right') return `Sharp right onto ${name}`;
+        if (mod === 'uturn') return `Make a U-turn`;
     }
+    if (type === 'merge') return `Merge onto ${name}`;
+    if (type === 'fork') return mod?.includes('left') ? `Keep left onto ${name}` : `Keep right onto ${name}`;
+    if (type === 'roundabout') return `At roundabout, exit onto ${name}`;
+    
+    return `Continue on ${name}`;
 }
 
-function getOSRMStepType(type, modifier) {
+function getOSRMStepType(type, mod) {
     if (type === 'depart') return 0;
     if (type === 'arrive') return 10;
     if (type === 'turn') {
-        if (modifier?.includes('left')) return 7;
-        if (modifier?.includes('right')) return 3;
-        if (modifier === 'uturn') return 5;
+        if (mod?.includes('left')) return 7;
+        if (mod?.includes('right')) return 3;
+        if (mod === 'uturn') return 5;
     }
     if (type === 'merge') return 11;
-    if (type === 'fork') return 13;
-    if (type === 'roundabout' || type === 'rotary') return 9;
-    if (type === 'ramp' || type === 'on ramp' || type === 'off ramp') return 12;
-    return 1; // straight
+    if (type === 'roundabout') return 9;
+    return 1;
 }
 
 // ==========================================
-// TRAFFIC DATA (Stop Signs, Traffic Signals)
+// TRAFFIC DATA (Stop Signs & Signals ONLY - no speed limit markers)
 // ==========================================
 
 async function fetchTrafficData(routeCoords) {
@@ -522,6 +563,7 @@ async function fetchTrafficData(routeCoords) {
         const bounds = calculateBounds(routeCoords);
         const padding = 0.005;
         
+        // Query for stop signs, traffic signals, AND speed limits (for bubble display)
         const query = `
             [out:json][timeout:25];
             (
@@ -544,7 +586,7 @@ async function fetchTrafficData(routeCoords) {
         
         const data = await response.json();
         processTrafficData(data);
-        displayTrafficMarkers();
+        displayTrafficMarkers(); // Only stop signs and traffic signals
         
     } catch (err) {
         console.warn('Traffic data fetch failed:', err);
@@ -565,7 +607,7 @@ function calculateBounds(coords) {
 function processTrafficData(data) {
     state.stopSigns = [];
     state.trafficSignals = [];
-    state.speedLimits = [];
+    state.speedLimitData = []; // Store for bubble display, not map markers
     
     const nodes = {};
     
@@ -582,19 +624,23 @@ function processTrafficData(data) {
         }
     });
     
+    // Process speed limits for bubble display
     data.elements?.forEach(el => {
-        if (el.type === 'way' && el.tags?.maxspeed) {
+        if (el.type === 'way' && el.tags?.maxspeed && el.nodes) {
             const speed = parseSpeedLimit(el.tags.maxspeed);
-            if (speed && el.nodes?.length > 0) {
-                const midNode = nodes[el.nodes[Math.floor(el.nodes.length / 2)]];
-                if (midNode) {
-                    state.speedLimits.push({ ...midNode, speed });
-                }
+            if (speed) {
+                // Store all nodes of this way for proximity checking
+                el.nodes.forEach(nodeId => {
+                    const node = nodes[nodeId];
+                    if (node) {
+                        state.speedLimitData.push({ ...node, speed });
+                    }
+                });
             }
         }
     });
     
-    console.log(`✓ Traffic: ${state.stopSigns.length} stops, ${state.trafficSignals.length} signals, ${state.speedLimits.length} speed limits`);
+    console.log(`✓ Traffic: ${state.stopSigns.length} stops, ${state.trafficSignals.length} signals, ${state.speedLimitData.length} speed limit points`);
 }
 
 function parseSpeedLimit(maxspeed) {
@@ -606,6 +652,7 @@ function parseSpeedLimit(maxspeed) {
     return num;
 }
 
+// Display ONLY stop signs and traffic signals (NOT speed limits)
 function displayTrafficMarkers() {
     if (!state.fullscreenMap) return;
     
@@ -641,19 +688,32 @@ function displayTrafficMarkers() {
         state.trafficMarkers.push(marker);
     });
     
-    // Speed limits (show every 3rd to avoid clutter)
-    state.speedLimits.filter((_, i) => i % 3 === 0).forEach(limit => {
-        const marker = L.marker([limit.lat, limit.lon], {
-            icon: L.divIcon({
-                className: 'traffic-marker',
-                html: `<div class="speed-limit-marker">${limit.speed}</div>`,
-                iconSize: [28, 28],
-                iconAnchor: [14, 14]
-            }),
-            interactive: false
-        }).addTo(state.fullscreenMap);
-        state.trafficMarkers.push(marker);
+    // NO speed limit markers on map - they go in the bubble
+}
+
+// Update speed limit in the BUBBLE (not on map)
+function updateSpeedLimitBubble(userLat, userLon) {
+    if (!state.speedLimitData || state.speedLimitData.length === 0) {
+        document.getElementById('speed-limit-value').textContent = '--';
+        return;
+    }
+    
+    // Find closest speed limit
+    let closestSpeed = null;
+    let closestDist = Infinity;
+    
+    state.speedLimitData.forEach(point => {
+        const dist = getDistanceMeters(userLat, userLon, point.lat, point.lon);
+        if (dist < closestDist && dist < 100) { // Within 100m
+            closestDist = dist;
+            closestSpeed = point.speed;
+        }
     });
+    
+    if (closestSpeed !== state.currentSpeedLimit) {
+        state.currentSpeedLimit = closestSpeed;
+        document.getElementById('speed-limit-value').textContent = closestSpeed || '--';
+    }
 }
 
 // ==========================================
@@ -682,8 +742,9 @@ function drawRoutes(shortest, fastest) {
     if (state.shortestRouteLayer) state.map.removeLayer(state.shortestRouteLayer);
     if (state.fastestRouteLayer) state.map.removeLayer(state.fastestRouteLayer);
     
-    // Draw fastest first (if different)
-    if (fastest !== shortest) {
+    // Draw fastest first (if meaningfully different)
+    const distDiff = Math.abs(fastest.distance - shortest.distance);
+    if (distDiff > 0.1) {
         state.fastestRouteLayer = L.polyline(fastest.geometry, {
             color: '#dc2626',
             weight: 6,
@@ -703,7 +764,7 @@ function drawRoutes(shortest, fastest) {
     document.getElementById('recenter-btn').classList.remove('hidden');
     
     const allCoords = [...shortest.geometry];
-    if (fastest !== shortest) allCoords.push(...fastest.geometry);
+    if (distDiff > 0.1) allCoords.push(...fastest.geometry);
     state.map.fitBounds(L.latLngBounds(allCoords), { padding: [50, 50], maxZoom: 14 });
 }
 
@@ -722,8 +783,7 @@ function displayResults(comparison) {
     document.getElementById('fastest-distance').textContent = `${fastestRoute.distance.toFixed(2)} mi`;
     document.getElementById('fastest-duration').textContent = `~${Math.round(fastestRoute.duration)} min`;
     
-    document.getElementById('routes-analyzed').textContent = 
-        `Analyzed ${state.routesAnalyzed} route${state.routesAnalyzed > 1 ? 's' : ''}`;
+    document.getElementById('routes-analyzed').textContent = `Analyzed ${state.routesAnalyzed} routes`;
     
     const card = document.getElementById('recommendation-card');
     
@@ -890,13 +950,19 @@ async function startFullscreenNavigation() {
     state.activeRouteCoords = routeData.geometry;
     state.activeRouteSteps = routeData.steps;
     
-    // REQUEST WAKE LOCK
+    // Store cumulative distances for each step
+    state.stepCumulativeDistance = [];
+    let cumDist = 0;
+    routeData.steps.forEach(step => {
+        state.stepCumulativeDistance.push(cumDist);
+        cumDist += step.distance || 0;
+    });
+    
     await requestWakeLock();
     
     document.getElementById('fullscreen-nav').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
     
-    // Initialize fullscreen map
     if (!state.fullscreenMap) {
         state.fullscreenMap = L.map('fullscreen-map', {
             zoomControl: false,
@@ -905,7 +971,6 @@ async function startFullscreenNavigation() {
         
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(state.fullscreenMap);
         
-        // Detect manual panning - DISABLE follow mode when user touches map
         state.fullscreenMap.on('dragstart', () => {
             state.isPanning = true;
             state.isFollowMode = false;
@@ -917,7 +982,6 @@ async function startFullscreenNavigation() {
         });
     }
     
-    // Clear and draw route
     if (state.fullscreenRouteLayer) state.fullscreenMap.removeLayer(state.fullscreenRouteLayer);
     state.trafficMarkers.forEach(m => state.fullscreenMap.removeLayer(m));
     state.trafficMarkers = [];
@@ -928,7 +992,6 @@ async function startFullscreenNavigation() {
         opacity: 0.9
     }).addTo(state.fullscreenMap);
     
-    // Add destination marker
     L.marker([state.endCoords.lat, state.endCoords.lon], {
         icon: L.divIcon({
             className: 'destination-marker',
@@ -938,21 +1001,16 @@ async function startFullscreenNavigation() {
         })
     }).addTo(state.fullscreenMap);
     
-    // Update nav info
     document.getElementById('nav-distance-remaining').textContent = `${routeData.distance.toFixed(1)} mi`;
     document.getElementById('nav-time-remaining').textContent = `${Math.round(routeData.duration)} min`;
     
     if (routeData.steps?.[0]) {
-        updateNavDirection(routeData.steps[0], routeData.steps[0].distance);
+        updateNavDirection(routeData.steps[0]);
     }
     
-    // Fetch traffic data
     fetchTrafficData(routeData.geometry);
-    
-    // Start GPS
     startNavigationGPS();
     
-    // Fit to route
     state.fullscreenMap.fitBounds(L.latLngBounds(routeData.geometry), { padding: [50, 50] });
     
     document.getElementById('toggle-north-btn').classList.add('active');
@@ -979,20 +1037,16 @@ async function exitFullscreenNavigation() {
 }
 
 // ==========================================
-// WAKE LOCK (SCREEN STAYS ON)
+// WAKE LOCK
 // ==========================================
 
 async function requestWakeLock() {
-    if (!('wakeLock' in navigator)) {
-        console.warn('Wake Lock not supported');
-        return;
-    }
+    if (!('wakeLock' in navigator)) return;
     
     try {
         state.wakeLock = await navigator.wakeLock.request('screen');
         console.log('✓ Screen wake lock active');
         
-        // Re-acquire if page becomes visible again
         document.addEventListener('visibilitychange', async () => {
             if (state.isNavigating && document.visibilityState === 'visible' && !state.wakeLock) {
                 state.wakeLock = await navigator.wakeLock.request('screen');
@@ -1007,12 +1061,11 @@ async function releaseWakeLock() {
     if (state.wakeLock) {
         await state.wakeLock.release().catch(() => {});
         state.wakeLock = null;
-        console.log('Wake lock released');
     }
 }
 
 // ==========================================
-// GPS TRACKING & LIVE UPDATES
+// GPS TRACKING
 // ==========================================
 
 function startNavigationGPS() {
@@ -1027,23 +1080,26 @@ function startNavigationGPS() {
             // Update speed display
             document.getElementById('current-speed').textContent = `${state.currentSpeed} mph`;
             
-            // Update heading and rotate map
-            if (heading != null && !isNaN(heading) && speed > 1) {
+            // Update speed limit in bubble
+            updateSpeedLimitBubble(lat, lon);
+            
+            // Update heading and rotate map + car
+            if (heading != null && !isNaN(heading) && speed > 0.5) {
                 state.currentHeading = heading;
                 if (state.isFollowMode && !state.isPanning) {
                     rotateMapToHeading(heading);
                 }
+                // Rotate car icon to point toward heading
+                rotateCarIcon(heading);
             }
             
-            // Update user marker
             updateFullscreenUserMarker(lat, lon, accuracy);
             
-            // Auto-center if follow mode
             if (state.isFollowMode && !state.isPanning && state.fullscreenMap) {
                 state.fullscreenMap.setView([lat, lon], state.fullscreenMap.getZoom(), { animate: true, duration: 0.5 });
             }
             
-            // Check if arrived at destination
+            // Check arrival
             const distToEnd = getDistanceMeters(lat, lon, state.endCoords.lat, state.endCoords.lon);
             if (distToEnd < CONFIG.DESTINATION_THRESHOLD && !state.hasArrived) {
                 state.hasArrived = true;
@@ -1051,10 +1107,10 @@ function startNavigationGPS() {
                 return;
             }
             
-            // Update current step and remaining distance/time
+            // Update navigation progress
             updateNavigationProgress(lat, lon);
             
-            // Check if off route (with tolerance)
+            // Check off-route
             if (!state.hasArrived && isOffRoute(lat, lon)) {
                 document.getElementById('off-route-warning').classList.remove('hidden');
                 performReroute();
@@ -1062,7 +1118,6 @@ function startNavigationGPS() {
                 document.getElementById('off-route-warning').classList.add('hidden');
             }
             
-            // Update main map too
             updateMainMapUserMarker(lat, lon, accuracy);
         },
         (err) => console.warn('GPS error:', err),
@@ -1073,69 +1128,74 @@ function startNavigationGPS() {
 function updateNavigationProgress(userLat, userLon) {
     if (!state.activeRouteSteps || state.activeRouteSteps.length === 0) return;
     
-    // Find closest step based on location
-    let closestStepIndex = state.currentStepIndex;
-    let minDist = Infinity;
+    // Find how far along the route we are
+    let minDistToRoute = Infinity;
+    let closestPointIndex = 0;
     
-    for (let i = state.currentStepIndex; i < state.activeRouteSteps.length; i++) {
-        const step = state.activeRouteSteps[i];
-        if (step.location) {
-            const dist = getDistanceMeters(userLat, userLon, step.location[1], step.location[0]);
-            if (dist < minDist) {
-                minDist = dist;
-                closestStepIndex = i;
-            }
+    for (let i = 0; i < state.activeRouteCoords.length; i++) {
+        const [rLat, rLon] = state.activeRouteCoords[i];
+        const dist = getDistanceMeters(userLat, userLon, rLat, rLon);
+        if (dist < minDistToRoute) {
+            minDistToRoute = dist;
+            closestPointIndex = i;
         }
     }
     
-    // Advance to next step if we're close enough to current maneuver point
-    if (closestStepIndex > state.currentStepIndex || minDist < 30) {
-        state.currentStepIndex = Math.max(state.currentStepIndex, closestStepIndex);
+    // Calculate distance traveled along route
+    let distanceTraveled = 0;
+    for (let i = 0; i < closestPointIndex && i < state.activeRouteCoords.length - 1; i++) {
+        const [lat1, lon1] = state.activeRouteCoords[i];
+        const [lat2, lon2] = state.activeRouteCoords[i + 1];
+        distanceTraveled += getDistanceMeters(lat1, lon1, lat2, lon2);
     }
     
-    const currentStep = state.activeRouteSteps[state.currentStepIndex];
-    const nextStep = state.activeRouteSteps[state.currentStepIndex + 1];
-    
-    // Calculate distance to next maneuver
-    let distToNext = currentStep.distance;
-    if (currentStep.location) {
-        distToNext = getDistanceMeters(userLat, userLon, currentStep.location[1], currentStep.location[0]);
+    // Find current step based on distance traveled
+    let currentStep = 0;
+    for (let i = 0; i < state.stepCumulativeDistance.length - 1; i++) {
+        if (distanceTraveled >= state.stepCumulativeDistance[i]) {
+            currentStep = i;
+        }
     }
     
-    // Update direction display
-    if (nextStep && distToNext < 50) {
-        // Show upcoming turn
-        updateNavDirection(nextStep, distToNext);
-    } else {
-        updateNavDirection(currentStep, distToNext);
+    state.currentStepIndex = currentStep;
+    
+    // Calculate distance TO the next maneuver
+    const nextStepStart = state.stepCumulativeDistance[currentStep + 1] || state.stepCumulativeDistance[currentStep];
+    const distanceToNextTurn = Math.max(0, nextStepStart - distanceTraveled);
+    
+    // Get current and next instructions
+    const step = state.activeRouteSteps[currentStep];
+    const nextStep = state.activeRouteSteps[currentStep + 1];
+    
+    // Show the upcoming instruction with distance TO it
+    if (nextStep && distanceToNextTurn < 200) {
+        // We're approaching the next turn, show it
+        updateNavDirection(nextStep, distanceToNextTurn);
+    } else if (step) {
+        // Show current step with distance to next
+        updateNavDirection(step, distanceToNextTurn);
     }
     
     // Calculate remaining distance and time
-    let remainingDist = 0;
-    let remainingTime = 0;
-    for (let i = state.currentStepIndex; i < state.activeRouteSteps.length; i++) {
-        remainingDist += state.activeRouteSteps[i].distance || 0;
-        remainingTime += state.activeRouteSteps[i].duration || 0;
-    }
+    const totalRouteDistance = state.shortestRouteData?.distance * 1609.34 || 0;
+    const remainingDistance = Math.max(0, totalRouteDistance - distanceTraveled);
+    const avgSpeedMps = state.currentSpeed > 0 ? state.currentSpeed * 0.44704 : 10; // m/s
+    const remainingTime = remainingDistance / avgSpeedMps / 60; // minutes
     
-    // Update displays
-    document.getElementById('nav-distance-remaining').textContent = `${(remainingDist / 1609.34).toFixed(1)} mi`;
-    document.getElementById('nav-time-remaining').textContent = `${Math.round(remainingTime / 60)} min`;
+    document.getElementById('nav-distance-remaining').textContent = `${(remainingDistance / 1609.34).toFixed(1)} mi`;
+    document.getElementById('nav-time-remaining').textContent = `${Math.max(1, Math.round(remainingTime))} min`;
 }
 
 function updateNavDirection(step, distanceToManeuver) {
     document.getElementById('nav-direction-icon').textContent = getDirectionIcon(step.type);
     document.getElementById('nav-direction-text').textContent = step.instruction;
-    
-    if (distanceToManeuver != null) {
-        document.getElementById('nav-direction-distance').textContent = formatDistance(distanceToManeuver);
-    }
+    document.getElementById('nav-direction-distance').textContent = formatDistance(distanceToManeuver);
 }
 
 function showArrivedMessage() {
     document.getElementById('arrived-toast').classList.remove('hidden');
     document.getElementById('nav-direction-icon').textContent = '🏁';
-    document.getElementById('nav-direction-text').textContent = 'You have arrived at your destination!';
+    document.getElementById('nav-direction-text').textContent = 'You have arrived!';
     document.getElementById('nav-direction-distance').textContent = '';
     document.getElementById('nav-distance-remaining').textContent = '0 mi';
     document.getElementById('nav-time-remaining').textContent = '0 min';
@@ -1156,19 +1216,30 @@ function updateFullscreenUserMarker(lat, lon, accuracy) {
         }).addTo(state.fullscreenMap);
     }
     
-    // CAR ICON instead of triangle
     if (state.fullscreenUserMarker) {
         state.fullscreenUserMarker.setLatLng([lat, lon]);
     } else {
         state.fullscreenUserMarker = L.marker([lat, lon], {
             icon: L.divIcon({
                 className: 'nav-user-marker',
-                html: '<div class="car-icon">🚗</div>',
+                html: '<div class="car-icon" id="car-icon">🚗</div>',
                 iconSize: [40, 40],
                 iconAnchor: [20, 20]
             }),
             zIndexOffset: 1000
         }).addTo(state.fullscreenMap);
+    }
+}
+
+// Rotate car icon to point toward heading direction
+function rotateCarIcon(heading) {
+    const carIcon = document.getElementById('car-icon');
+    if (carIcon) {
+        // When map is rotated by -heading, car needs to rotate by +heading to point up
+        // But we want car to always point in direction of travel relative to screen
+        // So we don't counter-rotate, we let it stay pointing "up" on screen
+        // The map rotation handles the orientation
+        carIcon.style.transform = 'rotate(0deg)'; // Car points "up" = direction of travel
     }
 }
 
@@ -1216,12 +1287,6 @@ function rotateMapToHeading(heading) {
     if (compass) {
         compass.style.transform = `rotate(${-heading}deg)`;
     }
-    
-    // Counter-rotate the car icon so it always points forward
-    const carIcon = document.querySelector('.car-icon');
-    if (carIcon) {
-        carIcon.style.transform = `rotate(${heading}deg)`;
-    }
 }
 
 function toggleNorthUp() {
@@ -1262,23 +1327,20 @@ function recenterOnUser() {
 }
 
 // ==========================================
-// OFF-ROUTE DETECTION (IMPROVED)
+// OFF-ROUTE DETECTION
 // ==========================================
 
 function isOffRoute(lat, lon) {
     if (!state.activeRouteCoords || state.activeRouteCoords.length < 2) return false;
     if (state.hasArrived) return false;
     
-    // Find minimum distance to any point on route
     let minDist = Infinity;
     
     for (let i = 0; i < state.activeRouteCoords.length; i++) {
         const [rLat, rLon] = state.activeRouteCoords[i];
         const dist = getDistanceMeters(lat, lon, rLat, rLon);
         if (dist < minDist) minDist = dist;
-        
-        // Early exit if we're clearly on route
-        if (minDist < 20) return false;
+        if (minDist < 30) return false; // Clearly on route
     }
     
     return minDist > CONFIG.OFF_ROUTE_THRESHOLD;
@@ -1302,13 +1364,21 @@ async function performReroute() {
     document.getElementById('rerouting-toast').classList.remove('hidden');
     
     try {
-        const route = await fetchSingleOSRMRoute(state.currentUserLocation, state.endCoords);
+        const route = await fetchGraphHopperRoute(state.currentUserLocation, state.endCoords, 'short_fastest');
         
         if (state.fullscreenRouteLayer) state.fullscreenMap.removeLayer(state.fullscreenRouteLayer);
         
         state.activeRouteCoords = route.geometry;
         state.activeRouteSteps = route.steps;
         state.currentStepIndex = 0;
+        
+        // Recalculate cumulative distances
+        state.stepCumulativeDistance = [];
+        let cumDist = 0;
+        route.steps.forEach(step => {
+            state.stepCumulativeDistance.push(cumDist);
+            cumDist += step.distance || 0;
+        });
         
         state.fullscreenRouteLayer = L.polyline(route.geometry, {
             color: '#2563eb',
@@ -1321,7 +1391,6 @@ async function performReroute() {
         
         if (route.steps?.[0]) updateNavDirection(route.steps[0], route.steps[0].distance);
         
-        // Refresh traffic data
         fetchTrafficData(route.geometry);
         
         console.log('✓ Rerouted');

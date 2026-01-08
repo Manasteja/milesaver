@@ -1,4 +1,4 @@
-const CACHE_NAME = 'milesaver-v10';
+const CACHE_NAME = 'milesaver-v11';
 const urlsToCache = ['/', '/index.html', '/styles.css', '/app.js', '/manifest.json'];
 
 self.addEventListener('install', e => {

@@ -1,4 +1,4 @@
-/* MileSaver v10 - Complete Styles */
+/* MileSaver v11 - Complete Styles */
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -360,19 +360,19 @@ body {
 }
 .nav-control-btn.active { background: var(--primary); color: white; }
 
-/* CAR ICON */
+/* CAR ICON - always points UP (forward) since map rotates */
 .nav-user-marker { position: relative; }
 .car-icon {
-    font-size: 32px;
+    font-size: 36px;
     filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));
-    transition: transform 0.3s ease-out;
+    /* Car always points UP - map rotation handles direction */
 }
 
 .destination-marker .dest-icon {
     font-size: 32px; text-shadow: 0 2px 4px rgba(0,0,0,0.3);
 }
 
-/* TRAFFIC MARKERS */
+/* TRAFFIC MARKERS - Stop signs and traffic lights only */
 .traffic-marker { pointer-events: none; }
 
 .stop-sign {
@@ -388,13 +388,7 @@ body {
     filter: drop-shadow(0 2px 3px rgba(0,0,0,0.3));
 }
 
-.speed-limit-marker {
-    width: 26px; height: 26px; background: white;
-    border: 3px solid var(--danger); border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 10px; font-weight: 900;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
-}
+/* Speed limit shown in bubble, not on map */
 
 /* TOASTS */
 .rerouting-toast {
