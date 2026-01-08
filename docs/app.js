@@ -30,6 +30,15 @@ const CONFIG = {
     OFF_ROUTE_THRESHOLD: 80,
     DESTINATION_THRESHOLD: 50,
     REROUTE_COOLDOWN: 15000,
+
+    // Routing quality controls
+    ENABLE_MULTI_CANDIDATE_SHORTEST: true,
+    GH_ALT_MAX_PATHS: 5,
+    GH_ALT_MAX_WEIGHT_FACTOR: 2.0,
+    GH_ALT_MAX_SHARE_FACTOR: 0.6,
+
+    // Debug
+    ENABLE_DEBUG_OVERLAY: false,
 };
 
 const state = {
@@ -110,9 +119,79 @@ function initializeApp() {
     document.getElementById('start-location').addEventListener('input', () => state.googleStartCoords = null);
     document.getElementById('end-location').addEventListener('input', () => state.googleEndCoords = null);
     
+    initDebugOverlay();
     console.log('✅ MileSaver v11 initialized');
 }
 
+
+// ==========================================
+// DEBUG OVERLAY (distance/time deltas + engines)
+// ==========================================
+
+function isDebugEnabled() {
+    const qs = new URLSearchParams(window.location.search);
+    return CONFIG.ENABLE_DEBUG_OVERLAY || qs.has('debug') || localStorage.getItem('milesaverDebug') === '1';
+}
+
+function initDebugOverlay() {
+    // Toggle with Ctrl+Shift+D
+    document.addEventListener('keydown', (e) => {
+        if (e.ctrlKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+            const next = isDebugEnabled() ? '0' : '1';
+            localStorage.setItem('milesaverDebug', next);
+            const el = document.getElementById('milesaver-debug-overlay');
+            if (el) el.style.display = next === '1' ? 'block' : 'none';
+        }
+    });
+
+    if (!isDebugEnabled()) return;
+
+    let el = document.getElementById('milesaver-debug-overlay');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'milesaver-debug-overlay';
+        el.style.position = 'fixed';
+        el.style.left = '12px';
+        el.style.bottom = '12px';
+        el.style.zIndex = '9999';
+        el.style.maxWidth = '360px';
+        el.style.padding = '10px 12px';
+        el.style.borderRadius = '10px';
+        el.style.background = 'rgba(0,0,0,0.75)';
+        el.style.color = '#fff';
+        el.style.font = '12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif';
+        el.style.boxShadow = '0 8px 24px rgba(0,0,0,0.35)';
+        el.innerHTML = '<div style="font-weight:600; margin-bottom:6px;">Debug</div><div>Run a search to see route deltas.</div>';
+        document.body.appendChild(el);
+    }
+    el.style.display = 'block';
+}
+
+function updateDebugOverlay(comparison) {
+    const el = document.getElementById('milesaver-debug-overlay');
+    if (!el || !isDebugEnabled()) return;
+    const s = comparison.shortestRoute;
+    const f = comparison.fastestRoute;
+    const milesSaved = comparison.milesSaved;
+    const extraTime = comparison.extraTime;
+    const sEngine = s?.engine || 'unknown';
+    const fEngine = f?.engine || 'unknown';
+    const sCand = s?.candidateCount || 1;
+    const sFallback = s?.engine === 'osrm' && s?.isFallback;
+    const fFallback = f?.engine === 'osrm' && f?.isFallback;
+
+    el.innerHTML = `
+        <div style="font-weight:600; margin-bottom:6px;">Debug (Ctrl+Shift+D to toggle)</div>
+        <div><strong>Shortest</strong>: ${s?.distance?.toFixed(2)} mi • ${Math.round(s?.duration || 0)} min
+            <span style="opacity:0.85;"> (${sEngine}${sFallback ? ' fallback' : ''}${sCand > 1 ? `, ${sCand} candidates` : ''})</span>
+        </div>
+        <div><strong>Fastest</strong>: ${f?.distance?.toFixed(2)} mi • ${Math.round(f?.duration || 0)} min
+            <span style="opacity:0.85;"> (${fEngine}${fFallback ? ' fallback' : ''})</span>
+        </div>
+        <div style="margin-top:6px;"><strong>Δ distance</strong>: ${milesSaved.toFixed(2)} mi (fastest - shortest)</div>
+        <div><strong>Δ time</strong>: ${extraTime.toFixed(0)} min (shortest - fastest)</div>
+    `;
+}
 function initializeMap() {
     state.map = L.map('map', { zoomControl: true }).setView([47.6062, -122.3321], 10);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -127,6 +206,7 @@ function setupSliders() {
     });
     document.getElementById('trips-per-month').addEventListener('input', (e) => {
         document.getElementById('trips-per-month-value').textContent = e.target.value;
+    updateDebugOverlay(comparison);
         updateSavingsDisplay();
     });
     document.getElementById('cost-per-mile').addEventListener('input', (e) => {
@@ -354,13 +434,15 @@ async function handleSearch() {
         
         // Fetch BOTH shortest (by distance) and fastest (by time) routes
         const [shortestRoute, fastestRoute] = await Promise.all([
-            fetchGraphHopperRoute(start, end, 'short_fastest'), // Prioritize distance
+            fetchGraphHopperRoute(start, end, 'shortest'),      // True distance-minimizing route
             fetchGraphHopperRoute(start, end, 'fastest')        // Prioritize time
         ]);
         
         state.shortestRouteData = shortestRoute;
         state.fastestRouteData = fastestRoute;
-        state.routesAnalyzed = 2;
+        const shortestCount = shortestRoute.candidateCount || 1;
+        const fastestCount = fastestRoute.candidateCount || 1;
+        state.routesAnalyzed = shortestCount + fastestCount;
         
         console.log('✓ Shortest:', shortestRoute.distance.toFixed(2), 'mi,', Math.round(shortestRoute.duration), 'min');
         console.log('✓ Fastest:', fastestRoute.distance.toFixed(2), 'mi,', Math.round(fastestRoute.duration), 'min');
@@ -390,12 +472,22 @@ async function handleSearch() {
 // GRAPHHOPPER ROUTING (supports distance optimization)
 // ==========================================
 
-async function fetchGraphHopperRoute(start, end, weighting = 'fastest') {
+async function fetchGraphHopperRoute(start, end, weighting = 'fastest', options = {}) {
     const url = new URL(CONFIG.GRAPHHOPPER_URL);
     url.searchParams.set('point', `${start.lat},${start.lon}`);
     url.searchParams.append('point', `${end.lat},${end.lon}`);
     url.searchParams.set('vehicle', 'car');
     url.searchParams.set('weighting', weighting);
+    
+    // Multi-candidate shortest (v1–v6 style): ask for multiple alternatives, then pick the minimum-distance path.
+    // Note: Only applied for weighting='shortest'. If the API rejects these params, we automatically retry without them.
+    const wantsMultiCandidate = (weighting === 'shortest' && CONFIG.ENABLE_MULTI_CANDIDATE_SHORTEST && !options.forceSinglePath);
+    if (wantsMultiCandidate) {
+        url.searchParams.set('algorithm', 'alternative_route');
+        url.searchParams.set('alternative_route.max_paths', String(CONFIG.GH_ALT_MAX_PATHS));
+        url.searchParams.set('alternative_route.max_weight_factor', String(CONFIG.GH_ALT_MAX_WEIGHT_FACTOR));
+        url.searchParams.set('alternative_route.max_share_factor', String(CONFIG.GH_ALT_MAX_SHARE_FACTOR));
+    }
     url.searchParams.set('instructions', 'true');
     url.searchParams.set('points_encoded', 'false');
     url.searchParams.set('key', CONFIG.GRAPHHOPPER_KEY);
@@ -406,8 +498,14 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest') {
         const response = await fetch(url);
         
         if (!response.ok) {
+            // If alternative_route params are rejected, retry once without them before falling back.
+            if (wantsMultiCandidate) {
+                console.warn('GraphHopper rejected alternative_route params; retrying shortest without multi-candidate options');
+                return await fetchGraphHopperRoute(start, end, 'shortest', { forceSinglePath: true });
+            }
             console.warn('GraphHopper failed, falling back to OSRM');
-            return await fetchOSRMRoute(start, end);
+            const osrm = await fetchOSRMRoute(start, end);
+            return { ...osrm, engine: 'osrm', isFallback: true, requestedWeighting: weighting, candidateCount: 1 };
         }
         
         const data = await response.json();
@@ -416,7 +514,10 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest') {
             throw new Error('No route found');
         }
         
-        const path = data.paths[0];
+        const path = wantsMultiCandidate
+            ? data.paths.reduce((best, p) => (!best || p.distance < best.distance ? p : best), null)
+            : data.paths[0];
+        const candidateCount = data.paths.length;
         
         // Parse instructions with DISTANCE TO next maneuver
         const steps = [];
@@ -442,12 +543,17 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest') {
             distance: path.distance / 1609.34, // meters to miles
             duration: path.time / 60000, // ms to minutes
             geometry: geometry,
-            steps: steps
+            steps: steps,
+            engine: 'graphhopper',
+            isFallback: false,
+            requestedWeighting: weighting,
+            candidateCount: candidateCount || 1
         };
         
     } catch (err) {
         console.warn('GraphHopper error:', err.message, '- falling back to OSRM');
-        return await fetchOSRMRoute(start, end);
+        const osrm = await fetchOSRMRoute(start, end);
+        return { ...osrm, engine: 'osrm', isFallback: true, requestedWeighting: weighting, candidateCount: 1 };
     }
 }
 
@@ -509,7 +615,11 @@ async function fetchOSRMRoute(start, end) {
         distance: route.distance / 1609.34,
         duration: route.duration / 60,
         geometry: geometry,
-        steps: steps
+        steps: steps,
+        engine: 'osrm',
+        isFallback: false,
+        requestedWeighting: 'fastest',
+        candidateCount: 1
     };
 }
 
@@ -774,6 +884,9 @@ function drawRoutes(shortest, fastest) {
 
 function displayResults(comparison) {
     const { shortestRoute, fastestRoute, milesSaved, extraTime } = comparison;
+    const shortestIsFallback = shortestRoute?.engine === 'osrm' && shortestRoute?.isFallback;
+    const fastestIsFallback = fastestRoute?.engine === 'osrm' && fastestRoute?.isFallback;
+
     const timeTolerance = parseFloat(document.getElementById('time-tolerance').value);
     const minSavings = parseFloat(document.getElementById('min-savings').value);
     
@@ -787,7 +900,11 @@ function displayResults(comparison) {
     
     const card = document.getElementById('recommendation-card');
     
-    if (milesSaved >= minSavings && milesSaved > 0.1) {
+    if (shortestIsFallback) {
+        card.className = 'recommendation-card warning';
+        card.innerHTML = `<div class="title">⚠️ Shortest-distance routing unavailable</div>` +
+            `<div class="subtitle">GraphHopper failed; showing OSRM fallback (time-optimized). Results may not reflect the true shortest-distance route.</div>`;
+    } else if (milesSaved >= minSavings && milesSaved > 0.1) {
         if (Math.abs(extraTime) <= timeTolerance) {
             card.className = 'recommendation-card success';
             card.innerHTML = `<div class="title">✅ Take the Shortest Route!</div><div class="subtitle">Save ${milesSaved.toFixed(2)} mi (${Math.abs(extraTime).toFixed(0)} min ${extraTime > 0 ? 'longer' : 'faster'})</div>`;
@@ -831,7 +948,11 @@ function showDirections(routeType) {
     const title = document.getElementById('directions-title');
     const content = document.getElementById('directions-content');
     
-    title.textContent = routeType === 'shortest' ? '📍 Shortest Route' : '📍 Fastest Route';
+    if (routeType === 'shortest' && routeData?.engine === 'osrm' && routeData?.isFallback) {
+        title.textContent = '📍 Fallback Route (OSRM - time optimized)';
+    } else {
+        title.textContent = routeType === 'shortest' ? '📍 Shortest Route' : '📍 Fastest Route';
+    }
     
     let html = '<ol class="directions-list">';
     routeData.steps.forEach(step => {
@@ -1364,7 +1485,7 @@ async function performReroute() {
     document.getElementById('rerouting-toast').classList.remove('hidden');
     
     try {
-        const route = await fetchGraphHopperRoute(state.currentUserLocation, state.endCoords, 'short_fastest');
+        const route = await fetchGraphHopperRoute(state.currentUserLocation, state.endCoords, 'shortest');
         
         if (state.fullscreenRouteLayer) state.fullscreenMap.removeLayer(state.fullscreenRouteLayer);
         
