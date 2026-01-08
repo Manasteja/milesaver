@@ -33,21 +33,6 @@ const CONFIG = {
 
     // Routing quality controls
     ENABLE_MULTI_CANDIDATE_SHORTEST: true,
-
-    // Shortcut Mode (distance-first with residential bias via GraphHopper custom_model)
-    ENABLE_SHORTCUT_MODE: true,
-
-    // Custom model: prefer residential/tertiary; de-prioritize trunk/motorway (still legal)
-    GH_CUSTOM_MODEL: {
-        priority: [
-            { if: "road_class == RESIDENTIAL", multiply_by: "1.4" },
-            { if: "road_class == TERTIARY", multiply_by: "1.2" },
-            { if: "road_class == SECONDARY", multiply_by: "1.0" },
-            { if: "road_class == PRIMARY", multiply_by: "0.7" },
-            { if: "road_class == TRUNK", multiply_by: "0.5" },
-            { if: "road_class == MOTORWAY", multiply_by: "0.3" }
-        ]
-    },
     GH_ALT_MAX_PATHS: 5,
     GH_ALT_MAX_WEIGHT_FACTOR: 2.0,
     GH_ALT_MAX_SHARE_FACTOR: 0.6,
@@ -58,6 +43,7 @@ const CONFIG = {
 
 const state = {
     map: null,
+    graphhopperDisabled: false, // set true on 401/403 to fail-fast for session
     fullscreenMap: null,
     startMarker: null,
     endMarker: null,
@@ -148,14 +134,6 @@ function isDebugEnabled() {
     return CONFIG.ENABLE_DEBUG_OVERLAY || qs.has('debug') || localStorage.getItem('milesaverDebug') === '1';
 }
 
-
-function isShortcutModeEnabled() {
-    const qs = new URLSearchParams(window.location.search);
-    // Enable via config, or `?shortcut=1`, or localStorage key.
-    if (qs.get('shortcut') === '0') return false;
-    return CONFIG.ENABLE_SHORTCUT_MODE || qs.has('shortcut') || localStorage.getItem('milesaverShortcut') === '1';
-}
-
 function initDebugOverlay() {
     // Toggle with Ctrl+Shift+D
     document.addEventListener('keydown', (e) => {
@@ -229,7 +207,7 @@ function setupSliders() {
     });
     document.getElementById('trips-per-month').addEventListener('input', (e) => {
         document.getElementById('trips-per-month-value').textContent = e.target.value;
-        updateDebugOverlay(state.routeComparison);
+    updateDebugOverlay(comparison);
         updateSavingsDisplay();
     });
     document.getElementById('cost-per-mile').addEventListener('input', (e) => {
@@ -478,7 +456,6 @@ async function handleSearch() {
         };
         
         state.routeComparison = comparison;
-        updateDebugOverlay(comparison);
         drawRoutes(shortestRoute, fastestRoute);
         displayResults(comparison);
         
@@ -500,7 +477,7 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest', options 
     const url = new URL(CONFIG.GRAPHHOPPER_URL);
     url.searchParams.set('point', `${start.lat},${start.lon}`);
     url.searchParams.append('point', `${end.lat},${end.lon}`);
-    url.searchParams.set('profile', 'car');
+    url.searchParams.set('vehicle', 'car');
     url.searchParams.set('weighting', weighting);
     
     // Multi-candidate shortest (v1–v6 style): ask for multiple alternatives, then pick the minimum-distance path.
@@ -508,6 +485,7 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest', options 
     const wantsMultiCandidate = (weighting === 'shortest' && CONFIG.ENABLE_MULTI_CANDIDATE_SHORTEST && !options.forceSinglePath);
     if (wantsMultiCandidate) {
         url.searchParams.set('algorithm', 'alternative_route');
+        url.searchParams.set('ch.disable', 'true'); // improves alt-route availability
         url.searchParams.set('alternative_route.max_paths', String(CONFIG.GH_ALT_MAX_PATHS));
         url.searchParams.set('alternative_route.max_weight_factor', String(CONFIG.GH_ALT_MAX_WEIGHT_FACTOR));
         url.searchParams.set('alternative_route.max_share_factor', String(CONFIG.GH_ALT_MAX_SHARE_FACTOR));
@@ -516,46 +494,22 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest', options 
     url.searchParams.set('points_encoded', 'false');
     url.searchParams.set('key', CONFIG.GRAPHHOPPER_KEY);
     
+    if (state.graphhopperDisabled) {
+        const osrm = await fetchOSRMRoute(start, end);
+        return { ...osrm, engine: 'osrm', isFallback: true, requestedWeighting: weighting, candidateCount: 1, fallbackReason: 'graphhopper_disabled' };
+    }
+
     console.log(`🔄 Fetching ${weighting} route from GraphHopper...`);
-
-    // Shortcut Mode: use GraphHopper POST + custom_model to bias toward smaller roads while still optimizing distance.
-    const useShortcutMode = (weighting === 'shortest' && isShortcutModeEnabled());
-
+    
     try {
-        let response;
-        if (useShortcutMode) {
-            const body = {
-                points: [
-                    [start.lon, start.lat],
-                    [end.lon, end.lat]
-                ],
-                profile: 'car',
-                weighting: 'shortest',
-                instructions: true,
-                points_encoded: false,
-                key: CONFIG.GRAPHHOPPER_KEY,
-                custom_model: CONFIG.GH_CUSTOM_MODEL
-            };
-
-            // If multi-candidate is enabled, request alternative routes and then pick the shortest path by distance.
-            if (wantsMultiCandidate) {
-                body.algorithm = 'alternative_route';
-                body['ch.disable'] = true;
-                body['alternative_route.max_paths'] = CONFIG.GH_ALT_MAX_PATHS;
-                body['alternative_route.max_weight_factor'] = CONFIG.GH_ALT_MAX_WEIGHT_FACTOR;
-                body['alternative_route.max_share_factor'] = CONFIG.GH_ALT_MAX_SHARE_FACTOR;
-            }
-
-            response = await fetch(CONFIG.GRAPHHOPPER_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            });
-        } else {
-            response = await fetch(url);
-        }
+        const response = await fetch(url);
         
         if (!response.ok) {
+            if (response.status === 401 || response.status === 403) {
+                console.warn(`GraphHopper auth failed (${response.status}); disabling GraphHopper for this session`);
+                state.graphhopperDisabled = true;
+            }
+
             // If alternative_route params are rejected, retry once without them before falling back.
             if (wantsMultiCandidate) {
                 console.warn('GraphHopper rejected alternative_route params; retrying shortest without multi-candidate options');
@@ -563,7 +517,7 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest', options 
             }
             console.warn('GraphHopper failed, falling back to OSRM');
             const osrm = await fetchOSRMRoute(start, end);
-            return { ...osrm, engine: 'osrm', isFallback: true, requestedWeighting: weighting, candidateCount: 1 };
+            return { ...osrm, engine: 'osrm', isFallback: true, requestedWeighting: weighting, candidateCount: 1, fallbackReason: 'graphhopper_error' };
         }
         
         const data = await response.json();
@@ -611,7 +565,7 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest', options 
     } catch (err) {
         console.warn('GraphHopper error:', err.message, '- falling back to OSRM');
         const osrm = await fetchOSRMRoute(start, end);
-        return { ...osrm, engine: 'osrm', isFallback: true, requestedWeighting: weighting, candidateCount: 1 };
+        return { ...osrm, engine: 'osrm', isFallback: true, requestedWeighting: weighting, candidateCount: 1, fallbackReason: 'graphhopper_error' };
     }
 }
 
@@ -1413,14 +1367,12 @@ function updateFullscreenUserMarker(lat, lon, accuracy) {
 // Rotate car icon to point toward heading direction
 function rotateCarIcon(heading) {
     const carIcon = document.getElementById('car-icon');
-    if (!carIcon) return;
-
-    // If map is rotating (follow mode), keep car pointing "up" on screen.
-    // If map is north-up, rotate car to match heading.
-    if (state.isFollowMode) {
-        carIcon.style.transform = 'rotate(0deg)';
-    } else {
-        carIcon.style.transform = `rotate(${heading}deg)`;
+    if (carIcon) {
+        // When map is rotated by -heading, car needs to rotate by +heading to point up
+        // But we want car to always point in direction of travel relative to screen
+        // So we don't counter-rotate, we let it stay pointing "up" on screen
+        // The map rotation handles the orientation
+        carIcon.style.transform = 'rotate(0deg)'; // Car points "up" = direction of travel
     }
 }
 
