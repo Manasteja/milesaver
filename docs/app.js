@@ -1,144 +1,134 @@
-/*******************************************************
- * MileSaver – app.js (FINAL, SIMPLIFIED, WORKING)
- * Uses OpenRouteService via Cloudflare Worker proxy
- *******************************************************/
+/*************************************************
+ * MileSaver – Clean ORS-only implementation
+ * Uses Cloudflare Worker as ORS proxy
+ *************************************************/
 
 const CONFIG = {
-  ORS_PROXY_URL: "https://milesaver-ors-proxy.teja-katakam.workers.dev",
+  ORS_PROXY_URL: "https://milesaver-ors-proxy.teja-katakam.workers.dev"
 };
 
-/* -------------------- STATE -------------------- */
+let map;
+let routeLayers = {};
+let startMarker, endMarker;
 
-const state = {
-  map: null,
-  markers: {},
-  routes: {},
-};
-
-/* -------------------- MAP INIT -------------------- */
+/* ---------------- MAP INIT ---------------- */
 
 function initMap() {
-  state.map = L.map("map").setView([47.6062, -122.3321], 10);
+  map = L.map("map").setView([47.6062, -122.3321], 10);
 
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-  }).addTo(state.map);
+    attribution: "© OpenStreetMap"
+  }).addTo(map);
 }
-
-/* -------------------- ROUTING -------------------- */
-
-async function fetchRoute(start, end, preference) {
-  const payload = {
-    coordinates: [
-      [start.lon, start.lat],
-      [end.lon, end.lat],
-    ],
-    preference,
-    profile: "driving-car",
-  };
-
-  const res = await fetch(CONFIG.ORS_PROXY_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  if (!res.ok) {
-    throw new Error(`ORS proxy failed: ${res.status}`);
-  }
-
-  const data = await res.json();
-
-  const feature = data.features[0];
-  const segment = feature.properties.segments[0];
-
-  return {
-    geometry: feature.geometry.coordinates.map(([lng, lat]) => [lat, lng]),
-    distanceMiles: segment.distance / 1609.344,
-    durationMinutes: segment.duration / 60,
-  };
-}
-
-/* -------------------- DRAW ROUTES -------------------- */
-
-function drawRoute(name, route, color) {
-  if (state.routes[name]) {
-    state.map.removeLayer(state.routes[name]);
-  }
-
-  state.routes[name] = L.polyline(route.geometry, {
-    color,
-    weight: 5,
-    opacity: 0.9,
-  }).addTo(state.map);
-
-  state.map.fitBounds(state.routes[name].getBounds(), { padding: [40, 40] });
-}
-
-/* -------------------- UI ACTION -------------------- */
-
-async function findBestRoute() {
-  const start = state.markers.start;
-  const end = state.markers.end;
-
-  if (!start || !end) {
-    alert("Please select start and end points");
-    return;
-  }
-
-  try {
-    const shortest = await fetchRoute(start, end, "shortest");
-    const fastest = await fetchRoute(start, end, "fastest");
-
-    drawRoute("shortest", shortest, "#2563eb"); // blue
-    drawRoute("fastest", fastest, "#dc2626");  // red
-
-    document.getElementById("shortest-distance").textContent =
-      `${shortest.distanceMiles.toFixed(2)} mi`;
-
-    document.getElementById("fastest-distance").textContent =
-      `${fastest.distanceMiles.toFixed(2)} mi`;
-
-  } catch (err) {
-    console.error(err);
-    alert("Routing failed. Check console.");
-  }
-}
-
-/* -------------------- MARKERS -------------------- */
-
-function setMarker(type, latlng) {
-  if (state.markers[type]) {
-    state.map.removeLayer(state.markers[type].marker);
-  }
-
-  const marker = L.marker(latlng).addTo(state.map);
-
-  state.markers[type] = {
-    marker,
-    lat: latlng.lat,
-    lon: latlng.lng,
-  };
-}
-
-/* -------------------- MAP CLICK HANDLER -------------------- */
-
-function enableClickSelection() {
-  let selecting = "start";
-
-  state.map.on("click", (e) => {
-    setMarker(selecting, e.latlng);
-    selecting = selecting === "start" ? "end" : "start";
-  });
-}
-
-/* -------------------- INIT -------------------- */
 
 document.addEventListener("DOMContentLoaded", () => {
   initMap();
-  enableClickSelection();
-
-  document
-    .getElementById("find-route-btn")
-    .addEventListener("click", findBestRoute);
+  document.getElementById("search-btn").addEventListener("click", findRoutes);
 });
+
+/* ---------------- ROUTING ---------------- */
+
+async function findRoutes() {
+  clearRoutes();
+
+  const start = document.getElementById("start-location").value;
+  const end = document.getElementById("end-location").value;
+
+  if (!start || !end) {
+    alert("Please enter both start and end locations");
+    return;
+  }
+
+  const startCoords = await geocode(start);
+  const endCoords = await geocode(end);
+
+  drawMarker(startCoords, true);
+  drawMarker(endCoords, false);
+
+  const shortest = await fetchRoute(startCoords, endCoords, "shortest");
+  const fastest = await fetchRoute(startCoords, endCoords, "fastest");
+
+  renderRoute(shortest, "shortest", "#2563eb"); // blue
+  renderRoute(fastest, "fastest", "#dc2626");  // red
+
+  updateStats(shortest, fastest);
+}
+
+/* ---------------- FETCH ORS ---------------- */
+
+async function fetchRoute(start, end, preference) {
+  const res = await fetch(CONFIG.ORS_PROXY_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      coordinates: [
+        [start.lng, start.lat],
+        [end.lng, end.lat]
+      ],
+      preference,
+      profile: "driving-car"
+    })
+  });
+
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(txt);
+  }
+
+  return await res.json();
+}
+
+/* ---------------- RENDER ---------------- */
+
+function renderRoute(geojson, type, color) {
+  const layer = L.geoJSON(geojson, {
+    style: { color, weight: 5 }
+  }).addTo(map);
+
+  routeLayers[type] = layer;
+  map.fitBounds(layer.getBounds(), { padding: [40, 40] });
+}
+
+function clearRoutes() {
+  Object.values(routeLayers).forEach(l => map.removeLayer(l));
+  routeLayers = {};
+  if (startMarker) map.removeLayer(startMarker);
+  if (endMarker) map.removeLayer(endMarker);
+}
+
+/* ---------------- MARKERS ---------------- */
+
+function drawMarker(coords, isStart) {
+  const marker = L.marker([coords.lat, coords.lng]).addTo(map);
+  if (isStart) startMarker = marker;
+  else endMarker = marker;
+}
+
+/* ---------------- GEOCODING ---------------- */
+
+async function geocode(query) {
+  const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!data.length) throw new Error("Location not found");
+  return { lat: +data[0].lat, lng: +data[0].lon };
+}
+
+/* ---------------- UI STATS ---------------- */
+
+function updateStats(shortest, fastest) {
+  const s = shortest.features[0].properties.segments[0];
+  const f = fastest.features[0].properties.segments[0];
+
+  document.getElementById("shortest-distance").innerText =
+    (s.distance / 1609).toFixed(2) + " mi";
+  document.getElementById("shortest-duration").innerText =
+    Math.round(s.duration / 60) + " min";
+
+  document.getElementById("fastest-distance").innerText =
+    (f.distance / 1609).toFixed(2) + " mi";
+  document.getElementById("fastest-duration").innerText =
+    Math.round(f.duration / 60) + " min";
+
+  document.getElementById("results-section").classList.remove("hidden");
+}
