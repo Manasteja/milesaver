@@ -1,16 +1,17 @@
 /**
- * MileSaver v11 - FIXED SHORTEST ROUTE
+ * MileSaver v12 - POLISHED NAVIGATION
  * 
  * ROUTING STRATEGY:
  * 1. PRIMARY: OpenRouteService via Cloudflare proxy (supports true shortest distance)
  * 2. SECONDARY: GraphHopper (if ORS fails)
  * 3. FALLBACK: OSRM (time-optimized only)
  * 
- * Features:
- * - TRUE shortest distance routing via ORS preference: 'shortest'
- * - Google Places autocomplete
- * - Full navigation with stop signs, traffic signals, speed limits
- * - Wake lock, rerouting, arrival detection
+ * v12 FIXES:
+ * - Smarter turn instructions ("Continue on..." when already on road)
+ * - Traffic markers limited to 0.5 mile radius around user
+ * - Improved time calculation accuracy
+ * - Car icon points in direction of movement
+ * - Position snapping to route for better accuracy
  */
 
 const CONFIG = {
@@ -36,6 +37,8 @@ const CONFIG = {
     OFF_ROUTE_THRESHOLD: 80,
     DESTINATION_THRESHOLD: 50,
     REROUTE_COOLDOWN: 15000,
+    TRAFFIC_MARKER_RADIUS: 805, // 0.5 miles in meters
+    ROUTE_SNAP_THRESHOLD: 30, // meters - snap to route if within this distance
 };
 
 const state = {
@@ -59,12 +62,14 @@ const state = {
     activeRouteCoords: [],
     activeRouteSteps: [],
     stepCumulativeDistance: [],
+    stepEndPoints: [], // Track where each step ends on the route
     gpsWatchId: null,
     googleStartCoords: null,
     googleEndCoords: null,
     currentUserLocation: null,
     currentSpeed: 0,
     currentHeading: 0,
+    lastValidHeading: 0, // Track last valid heading for car icon
     isNavigating: false,
     isFollowMode: true,
     isPanning: false,
@@ -79,6 +84,8 @@ const state = {
     trafficSignals: [],
     speedLimitData: [],
     currentSpeedLimit: null,
+    routeAvgSpeed: 30, // Average speed for the route in mph (updated from route data)
+    currentRoadName: '', // Track current road for smarter instructions
 };
 
 // ==========================================
@@ -118,7 +125,7 @@ function initializeApp() {
     document.getElementById('start-location').addEventListener('input', () => state.googleStartCoords = null);
     document.getElementById('end-location').addEventListener('input', () => state.googleEndCoords = null);
     
-    console.log('✅ MileSaver v11 initialized (ORS proxy for shortest routes)');
+    console.log('✅ MileSaver v12 initialized (polished navigation)');
 }
 
 function initializeMap() {
@@ -361,7 +368,6 @@ async function handleSearch() {
         addMarkers(start, end);
         
         // Fetch BOTH shortest (by distance) and fastest (by time) routes
-        // Using ORS proxy which supports TRUE shortest distance routing
         const [shortestRoute, fastestRoute] = await Promise.all([
             fetchRoute(start, end, 'shortest'),
             fetchRoute(start, end, 'fastest')
@@ -371,8 +377,14 @@ async function handleSearch() {
         state.fastestRouteData = fastestRoute;
         state.routesAnalyzed = 2;
         
+        // Calculate average speed from route data for better time estimates
+        if (shortestRoute.distance > 0 && shortestRoute.duration > 0) {
+            state.routeAvgSpeed = (shortestRoute.distance / shortestRoute.duration) * 60; // mph
+        }
+        
         console.log('✓ Shortest:', shortestRoute.distance.toFixed(2), 'mi,', Math.round(shortestRoute.duration), 'min');
         console.log('✓ Fastest:', fastestRoute.distance.toFixed(2), 'mi,', Math.round(fastestRoute.duration), 'min');
+        console.log('✓ Route avg speed:', state.routeAvgSpeed.toFixed(1), 'mph');
         
         const comparison = {
             shortestRoute: shortestRoute,
@@ -439,7 +451,7 @@ async function fetchORSRoute(start, end, preference = 'fastest') {
                 [start.lon, start.lat],
                 [end.lon, end.lat]
             ],
-            preference: preference,  // 'shortest' or 'fastest' - THIS IS THE KEY!
+            preference: preference,
             instructions: true,
             units: 'm'
         })
@@ -452,7 +464,6 @@ async function fetchORSRoute(start, end, preference = 'fastest') {
     
     const data = await response.json();
     
-    // ORS returns GeoJSON format
     if (!data.features || data.features.length === 0) {
         throw new Error('No route found');
     }
@@ -464,7 +475,7 @@ async function fetchORSRoute(start, end, preference = 'fastest') {
     // Convert coordinates from [lon, lat] to [lat, lon] for Leaflet
     const geometry = feature.geometry.coordinates.map(c => [c[1], c[0]]);
     
-    // Parse steps
+    // Parse steps with road names for smarter instructions
     const steps = [];
     if (segment.steps) {
         segment.steps.forEach(step => {
@@ -473,14 +484,15 @@ async function fetchORSRoute(start, end, preference = 'fastest') {
                 distance: step.distance,
                 duration: step.duration,
                 type: mapORSType(step.type),
-                name: step.name
+                name: step.name || '',
+                wayPoints: step.way_points // Start and end indices in geometry
             });
         });
     }
     
     return {
-        distance: props.summary.distance / 1609.34, // meters to miles
-        duration: props.summary.duration / 60, // seconds to minutes
+        distance: props.summary.distance / 1609.34,
+        duration: props.summary.duration / 60,
         geometry: geometry,
         steps: steps,
         source: 'ORS'
@@ -489,20 +501,7 @@ async function fetchORSRoute(start, end, preference = 'fastest') {
 
 function mapORSType(type) {
     const typeMap = {
-        0: 7,   // left
-        1: 3,   // right
-        2: 5,   // sharp left
-        3: 4,   // sharp right
-        4: 8,   // slight left
-        5: 2,   // slight right
-        6: 1,   // straight
-        7: 9,   // roundabout
-        8: 9,   // roundabout
-        9: 5,   // uturn
-        10: 10, // goal
-        11: 0,  // depart
-        12: 7,  // keep left
-        13: 3   // keep right
+        0: 7, 1: 3, 2: 5, 3: 4, 4: 8, 5: 2, 6: 1, 7: 9, 8: 9, 9: 5, 10: 10, 11: 0, 12: 7, 13: 3
     };
     return typeMap[type] || 1;
 }
@@ -546,6 +545,7 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest') {
                 distance: inst.distance,
                 duration: inst.time / 1000,
                 type: mapGraphHopperSign(inst.sign),
+                name: inst.street_name || '',
                 interval: inst.interval
             });
         }
@@ -597,6 +597,7 @@ async function fetchOSRMRoute(start, end) {
                         distance: step.distance,
                         duration: step.duration,
                         type: getOSRMStepType(step.maneuver?.type, step.maneuver?.modifier),
+                        name: step.name || '',
                         location: step.maneuver?.location
                     });
                 });
@@ -687,7 +688,7 @@ async function fetchTrafficData(routeCoords) {
         
         const data = await response.json();
         processTrafficData(data);
-        displayTrafficMarkers();
+        // Initial display will be called from GPS update
         
     } catch (err) {
         console.warn('Traffic data fetch failed:', err);
@@ -751,36 +752,48 @@ function parseSpeedLimit(maxspeed) {
     return num;
 }
 
-function displayTrafficMarkers() {
+// FIX #2: Only display traffic markers within 0.5 mile radius of user
+function displayTrafficMarkersNearUser(userLat, userLon) {
     if (!state.fullscreenMap) return;
     
+    // Remove existing markers
     state.trafficMarkers.forEach(m => state.fullscreenMap.removeLayer(m));
     state.trafficMarkers = [];
     
+    const radius = CONFIG.TRAFFIC_MARKER_RADIUS; // 0.5 miles in meters
+    
+    // Only show stop signs within radius
     state.stopSigns.forEach(sign => {
-        const marker = L.marker([sign.lat, sign.lon], {
-            icon: L.divIcon({
-                className: 'traffic-marker',
-                html: '<div class="stop-sign">STOP</div>',
-                iconSize: [30, 30],
-                iconAnchor: [15, 15]
-            }),
-            interactive: false
-        }).addTo(state.fullscreenMap);
-        state.trafficMarkers.push(marker);
+        const dist = getDistanceMeters(userLat, userLon, sign.lat, sign.lon);
+        if (dist <= radius) {
+            const marker = L.marker([sign.lat, sign.lon], {
+                icon: L.divIcon({
+                    className: 'traffic-marker',
+                    html: '<div class="stop-sign">STOP</div>',
+                    iconSize: [30, 30],
+                    iconAnchor: [15, 15]
+                }),
+                interactive: false
+            }).addTo(state.fullscreenMap);
+            state.trafficMarkers.push(marker);
+        }
     });
     
+    // Only show traffic signals within radius
     state.trafficSignals.forEach(signal => {
-        const marker = L.marker([signal.lat, signal.lon], {
-            icon: L.divIcon({
-                className: 'traffic-marker',
-                html: '<div class="traffic-light">🚦</div>',
-                iconSize: [24, 24],
-                iconAnchor: [12, 12]
-            }),
-            interactive: false
-        }).addTo(state.fullscreenMap);
-        state.trafficMarkers.push(marker);
+        const dist = getDistanceMeters(userLat, userLon, signal.lat, signal.lon);
+        if (dist <= radius) {
+            const marker = L.marker([signal.lat, signal.lon], {
+                icon: L.divIcon({
+                    className: 'traffic-marker',
+                    html: '<div class="traffic-light">🚦</div>',
+                    iconSize: [24, 24],
+                    iconAnchor: [12, 12]
+                }),
+                interactive: false
+            }).addTo(state.fullscreenMap);
+            state.trafficMarkers.push(marker);
+        }
     });
 }
 
@@ -833,8 +846,6 @@ function drawRoutes(shortest, fastest) {
     if (state.shortestRouteLayer) state.map.removeLayer(state.shortestRouteLayer);
     if (state.fastestRouteLayer) state.map.removeLayer(state.fastestRouteLayer);
     
-    const distDiff = Math.abs(fastest.distance - shortest.distance);
-    
     // Always draw fastest route first (underneath) - BRIGHT RED, THICK
     state.fastestRouteLayer = L.polyline(fastest.geometry, {
         color: '#dc2626',
@@ -853,11 +864,9 @@ function drawRoutes(shortest, fastest) {
     document.getElementById('map-legend').classList.remove('hidden');
     document.getElementById('recenter-btn').classList.remove('hidden');
     
-    // Fit bounds to show both routes
     const allCoords = [...shortest.geometry, ...fastest.geometry];
     state.map.fitBounds(L.latLngBounds(allCoords), { padding: [50, 50], maxZoom: 14 });
     
-    // Log route sources for debugging
     console.log(`📍 Shortest route source: ${shortest.source || 'unknown'}`);
     console.log(`📍 Fastest route source: ${fastest.source || 'unknown'}`);
 }
@@ -1043,7 +1052,9 @@ async function startFullscreenNavigation() {
     state.currentStepIndex = 0;
     state.activeRouteCoords = routeData.geometry;
     state.activeRouteSteps = routeData.steps;
+    state.currentRoadName = '';
     
+    // Calculate cumulative distances for each step
     state.stepCumulativeDistance = [];
     let cumDist = 0;
     routeData.steps.forEach(step => {
@@ -1098,7 +1109,7 @@ async function startFullscreenNavigation() {
     document.getElementById('nav-time-remaining').textContent = `${Math.round(routeData.duration)} min`;
     
     if (routeData.steps?.[0]) {
-        updateNavDirection(routeData.steps[0]);
+        updateNavDirection(routeData.steps[0], routeData.steps[0].distance);
     }
     
     fetchTrafficData(routeData.geometry);
@@ -1174,18 +1185,28 @@ function startNavigationGPS() {
             
             updateSpeedLimitBubble(lat, lon);
             
+            // FIX #2: Update traffic markers based on user position
+            displayTrafficMarkersNearUser(lat, lon);
+            
+            // FIX #4: Track heading for car icon rotation
             if (heading != null && !isNaN(heading) && speed > 0.5) {
                 state.currentHeading = heading;
+                state.lastValidHeading = heading; // Store last valid heading
                 if (state.isFollowMode && !state.isPanning) {
                     rotateMapToHeading(heading);
                 }
-                rotateCarIcon(heading);
             }
             
-            updateFullscreenUserMarker(lat, lon, accuracy);
+            // FIX #5: Snap position to route if close enough
+            const snappedPosition = snapToRoute(lat, lon);
+            
+            updateFullscreenUserMarker(snappedPosition.lat, snappedPosition.lon, accuracy);
+            
+            // Rotate car icon based on heading (FIX #4)
+            rotateCarIcon(state.lastValidHeading);
             
             if (state.isFollowMode && !state.isPanning && state.fullscreenMap) {
-                state.fullscreenMap.setView([lat, lon], state.fullscreenMap.getZoom(), { animate: true, duration: 0.5 });
+                state.fullscreenMap.setView([snappedPosition.lat, snappedPosition.lon], state.fullscreenMap.getZoom(), { animate: true, duration: 0.5 });
             }
             
             const distToEnd = getDistanceMeters(lat, lon, state.endCoords.lat, state.endCoords.lon);
@@ -1211,6 +1232,33 @@ function startNavigationGPS() {
     );
 }
 
+// FIX #5: Snap user position to nearest point on route
+function snapToRoute(lat, lon) {
+    if (!state.activeRouteCoords || state.activeRouteCoords.length < 2) {
+        return { lat, lon };
+    }
+    
+    let minDist = Infinity;
+    let closestPoint = { lat, lon };
+    
+    for (let i = 0; i < state.activeRouteCoords.length; i++) {
+        const [rLat, rLon] = state.activeRouteCoords[i];
+        const dist = getDistanceMeters(lat, lon, rLat, rLon);
+        if (dist < minDist) {
+            minDist = dist;
+            closestPoint = { lat: rLat, lon: rLon };
+        }
+    }
+    
+    // Only snap if within threshold
+    if (minDist <= CONFIG.ROUTE_SNAP_THRESHOLD) {
+        return closestPoint;
+    }
+    
+    return { lat, lon };
+}
+
+// FIX #1 & #3: Improved navigation progress with smarter instructions and better time
 function updateNavigationProgress(userLat, userLon) {
     if (!state.activeRouteSteps || state.activeRouteSteps.length === 0) return;
     
@@ -1226,6 +1274,7 @@ function updateNavigationProgress(userLat, userLon) {
         }
     }
     
+    // Calculate distance traveled along route
     let distanceTraveled = 0;
     for (let i = 0; i < closestPointIndex && i < state.activeRouteCoords.length - 1; i++) {
         const [lat1, lon1] = state.activeRouteCoords[i];
@@ -1233,6 +1282,7 @@ function updateNavigationProgress(userLat, userLon) {
         distanceTraveled += getDistanceMeters(lat1, lon1, lat2, lon2);
     }
     
+    // Find current step based on distance traveled
     let currentStep = 0;
     for (let i = 0; i < state.stepCumulativeDistance.length - 1; i++) {
         if (distanceTraveled >= state.stepCumulativeDistance[i]) {
@@ -1242,25 +1292,81 @@ function updateNavigationProgress(userLat, userLon) {
     
     state.currentStepIndex = currentStep;
     
+    // Calculate distance to next turn
     const nextStepStart = state.stepCumulativeDistance[currentStep + 1] || state.stepCumulativeDistance[currentStep];
     const distanceToNextTurn = Math.max(0, nextStepStart - distanceTraveled);
     
     const step = state.activeRouteSteps[currentStep];
     const nextStep = state.activeRouteSteps[currentStep + 1];
     
-    if (nextStep && distanceToNextTurn < 200) {
-        updateNavDirection(nextStep, distanceToNextTurn);
-    } else if (step) {
-        updateNavDirection(step, distanceToNextTurn);
+    // FIX #1: Smart instruction - check if we need to show "Continue on..." or upcoming turn
+    if (step) {
+        const roadName = extractRoadName(step.instruction);
+        
+        // If we're well into this step (more than 100m past the turn), show "Continue on..."
+        const distanceIntoStep = distanceTraveled - state.stepCumulativeDistance[currentStep];
+        
+        if (distanceIntoStep > 100 && distanceToNextTurn > 200 && roadName) {
+            // We're on this road, show continue instruction
+            const continueInstruction = `Continue on ${roadName}`;
+            updateNavDirectionSmart(continueInstruction, distanceToNextTurn, 1); // type 1 = straight
+        } else if (nextStep && distanceToNextTurn < 200) {
+            // Approaching next turn, show that instruction
+            updateNavDirectionSmart(nextStep.instruction, distanceToNextTurn, nextStep.type);
+        } else {
+            // Show current step instruction
+            updateNavDirectionSmart(step.instruction, distanceToNextTurn, step.type);
+        }
     }
     
-    const totalRouteDistance = state.shortestRouteData?.distance * 1609.34 || 0;
+    // FIX #3: Better time calculation using route average speed
+    const routeData = state.selectedRoute === 'shortest' ? state.shortestRouteData : state.fastestRouteData;
+    const totalRouteDistance = routeData?.distance * 1609.34 || 0;
     const remainingDistance = Math.max(0, totalRouteDistance - distanceTraveled);
-    const avgSpeedMps = state.currentSpeed > 0 ? state.currentSpeed * 0.44704 : 10;
-    const remainingTime = remainingDistance / avgSpeedMps / 60;
+    
+    // Use route's original time estimate proportionally, or calculate from avg speed
+    let remainingTime;
+    if (routeData && totalRouteDistance > 0) {
+        // Proportional time based on remaining distance
+        const proportionRemaining = remainingDistance / totalRouteDistance;
+        remainingTime = routeData.duration * proportionRemaining;
+    } else {
+        // Fallback: use route average speed (more stable than current speed)
+        const avgSpeedMps = state.routeAvgSpeed * 0.44704; // Convert mph to m/s
+        remainingTime = remainingDistance / avgSpeedMps / 60;
+    }
     
     document.getElementById('nav-distance-remaining').textContent = `${(remainingDistance / 1609.34).toFixed(1)} mi`;
     document.getElementById('nav-time-remaining').textContent = `${Math.max(1, Math.round(remainingTime))} min`;
+}
+
+// FIX #1: Extract road name from instruction
+function extractRoadName(instruction) {
+    if (!instruction) return null;
+    
+    // Common patterns: "Turn right onto Main Street", "Continue on 244th Avenue Northeast"
+    const patterns = [
+        /onto (.+)$/i,
+        /on (.+)$/i,
+        /toward (.+)$/i,
+        /Head .+ on (.+)$/i
+    ];
+    
+    for (const pattern of patterns) {
+        const match = instruction.match(pattern);
+        if (match && match[1]) {
+            return match[1].trim();
+        }
+    }
+    
+    return null;
+}
+
+// FIX #1: Update navigation direction with smart instruction
+function updateNavDirectionSmart(instruction, distanceToManeuver, type) {
+    document.getElementById('nav-direction-icon').textContent = getDirectionIcon(type);
+    document.getElementById('nav-direction-text').textContent = instruction;
+    document.getElementById('nav-direction-distance').textContent = formatDistance(distanceToManeuver);
 }
 
 function updateNavDirection(step, distanceToManeuver) {
@@ -1296,10 +1402,11 @@ function updateFullscreenUserMarker(lat, lon, accuracy) {
     if (state.fullscreenUserMarker) {
         state.fullscreenUserMarker.setLatLng([lat, lon]);
     } else {
+        // FIX #4: Use a proper car SVG that can be rotated
         state.fullscreenUserMarker = L.marker([lat, lon], {
             icon: L.divIcon({
                 className: 'nav-user-marker',
-                html: '<div class="car-icon" id="car-icon">🚗</div>',
+                html: '<div class="car-icon" id="car-icon"><svg viewBox="0 0 24 24" width="32" height="32"><path fill="#2563eb" d="M12 2L4 12h3v8h10v-8h3L12 2z"/><circle fill="#fff" cx="12" cy="12" r="3"/></svg></div>',
                 iconSize: [40, 40],
                 iconAnchor: [20, 20]
             }),
@@ -1308,10 +1415,20 @@ function updateFullscreenUserMarker(lat, lon, accuracy) {
     }
 }
 
+// FIX #4: Rotate car icon based on heading
 function rotateCarIcon(heading) {
     const carIcon = document.getElementById('car-icon');
-    if (carIcon) {
-        carIcon.style.transform = 'rotate(0deg)';
+    if (carIcon && heading != null && !isNaN(heading)) {
+        // When map rotates, car should point "up" (in direction of travel)
+        // If map rotation is enabled, car stays pointing up
+        // If map rotation is disabled (north-up), car rotates with heading
+        if (state.isFollowMode) {
+            // Map is rotating, car points up
+            carIcon.style.transform = 'rotate(0deg)';
+        } else {
+            // Map is north-up, car rotates with heading
+            carIcon.style.transform = `rotate(${heading}deg)`;
+        }
     }
 }
 
@@ -1372,11 +1489,13 @@ function toggleNorthUp() {
         if (state.currentUserLocation) {
             state.fullscreenMap.setView([state.currentUserLocation.lat, state.currentUserLocation.lon], 17);
         }
+        rotateCarIcon(0); // Car points up when map rotates
     } else {
         btn.classList.remove('active');
         btn.innerHTML = '🔺';
         const wrapper = document.getElementById('map-rotation-wrapper');
         if (wrapper) wrapper.style.transform = 'translate(-50%, -50%) rotate(0deg)';
+        rotateCarIcon(state.lastValidHeading); // Car rotates when map is north-up
     }
 }
 
@@ -1444,12 +1563,18 @@ async function performReroute() {
         state.activeRouteSteps = route.steps;
         state.currentStepIndex = 0;
         
+        // Recalculate cumulative distances
         state.stepCumulativeDistance = [];
         let cumDist = 0;
         route.steps.forEach(step => {
             state.stepCumulativeDistance.push(cumDist);
             cumDist += step.distance || 0;
         });
+        
+        // Update route average speed
+        if (route.distance > 0 && route.duration > 0) {
+            state.routeAvgSpeed = (route.distance / route.duration) * 60;
+        }
         
         state.fullscreenRouteLayer = L.polyline(route.geometry, {
             color: '#2563eb',

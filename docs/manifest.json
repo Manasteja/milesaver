@@ -1,10 +1,10 @@
 {
-    "name": "MileSaver",
+    "name": "MileSaver - Save Miles, Save Money",
     "short_name": "MileSaver",
-    "description": "Find shortest driving routes to save money",
-    "start_url": "/milesaver/",
+    "description": "Find shortest routes to save money",
+    "start_url": "/",
     "display": "standalone",
-    "background_color": "#1e40af",
-    "theme_color": "#1e40af",
-    "icons": []
+    "background_color": "#1a1a2e",
+    "theme_color": "#2563eb",
+    "orientation": "portrait"
 }
