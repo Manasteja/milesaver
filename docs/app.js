@@ -1,30 +1,30 @@
 /**
- * MileSaver v11 - COMPLETE RESTORATION
+ * MileSaver v11 - FIXED SHORTEST ROUTE
+ * 
+ * ROUTING STRATEGY:
+ * 1. PRIMARY: OpenRouteService via Cloudflare proxy (supports true shortest distance)
+ * 2. SECONDARY: GraphHopper (if ORS fails)
+ * 3. FALLBACK: OSRM (time-optimized only)
  * 
  * Features:
- * 1. GraphHopper API for TRUE shortest distance routing
- * 2. Google Places autocomplete
- * 3. Full navigation mode with:
- *    - Stop signs & traffic signals on map
- *    - Speed limit in bubble display
- *    - Turn-by-turn directions with distance TO next turn
- *    - Wake lock (screen stays on)
- *    - Automatic rerouting
- *    - Arrival detection
- *    - Map rotation (user perspective)
- * 4. Elevation data
- * 5. Savings calculator
+ * - TRUE shortest distance routing via ORS preference: 'shortest'
+ * - Google Places autocomplete
+ * - Full navigation with stop signs, traffic signals, speed limits
+ * - Wake lock, rerouting, arrival detection
  */
 
 const CONFIG = {
-    // GraphHopper - supports shortest distance routing + CORS friendly
+    // PRIMARY: OpenRouteService via Cloudflare Worker proxy (supports TRUE shortest)
+    ORS_PROXY_URL: 'https://milesaver-ors-proxy.teja-katakam.workers.dev',
+    
+    // SECONDARY: GraphHopper
     GRAPHHOPPER_URL: 'https://graphhopper.com/api/1/route',
     GRAPHHOPPER_KEY: '2511f66d-11d1-4b14-804a-57977321e912',
     
-    // Fallback to OSRM
+    // FALLBACK: OSRM (time-optimized only)
     OSRM_URL: 'https://router.project-osrm.org/route/v1/driving',
     
-    // Google API for Places and Geocoding
+    // Google API
     GOOGLE_API_KEY: 'AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0',
     
     // Other APIs
@@ -118,7 +118,7 @@ function initializeApp() {
     document.getElementById('start-location').addEventListener('input', () => state.googleStartCoords = null);
     document.getElementById('end-location').addEventListener('input', () => state.googleEndCoords = null);
     
-    console.log('✅ MileSaver v11 initialized');
+    console.log('✅ MileSaver v11 initialized (ORS proxy for shortest routes)');
 }
 
 function initializeMap() {
@@ -361,9 +361,10 @@ async function handleSearch() {
         addMarkers(start, end);
         
         // Fetch BOTH shortest (by distance) and fastest (by time) routes
+        // Using ORS proxy which supports TRUE shortest distance routing
         const [shortestRoute, fastestRoute] = await Promise.all([
-            fetchGraphHopperRoute(start, end, 'short_fastest'),
-            fetchGraphHopperRoute(start, end, 'fastest')
+            fetchRoute(start, end, 'shortest'),
+            fetchRoute(start, end, 'fastest')
         ]);
         
         state.shortestRouteData = shortestRoute;
@@ -395,7 +396,119 @@ async function handleSearch() {
 }
 
 // ==========================================
-// GRAPHHOPPER ROUTING (supports distance optimization)
+// UNIFIED ROUTING (ORS → GraphHopper → OSRM)
+// ==========================================
+
+async function fetchRoute(start, end, preference) {
+    // Try ORS proxy first (supports true shortest distance)
+    try {
+        const route = await fetchORSRoute(start, end, preference);
+        console.log(`✓ ORS ${preference} route successful`);
+        return route;
+    } catch (err) {
+        console.warn(`ORS ${preference} failed:`, err.message);
+    }
+    
+    // Try GraphHopper second
+    try {
+        const weighting = preference === 'shortest' ? 'short_fastest' : 'fastest';
+        const route = await fetchGraphHopperRoute(start, end, weighting);
+        console.log(`✓ GraphHopper ${weighting} route successful`);
+        return route;
+    } catch (err) {
+        console.warn(`GraphHopper failed:`, err.message);
+    }
+    
+    // Fallback to OSRM (time-only, but at least works)
+    console.log('⚠️ Falling back to OSRM (time-optimized only)');
+    return await fetchOSRMRoute(start, end);
+}
+
+// ==========================================
+// ORS ROUTING VIA CLOUDFLARE PROXY (PRIMARY)
+// ==========================================
+
+async function fetchORSRoute(start, end, preference = 'fastest') {
+    console.log(`🔄 Fetching ORS ${preference} route via proxy...`);
+    
+    const response = await fetch(CONFIG.ORS_PROXY_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            coordinates: [
+                [start.lon, start.lat],
+                [end.lon, end.lat]
+            ],
+            preference: preference,  // 'shortest' or 'fastest' - THIS IS THE KEY!
+            instructions: true,
+            units: 'm'
+        })
+    });
+    
+    if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`ORS error ${response.status}: ${text}`);
+    }
+    
+    const data = await response.json();
+    
+    // ORS returns GeoJSON format
+    if (!data.features || data.features.length === 0) {
+        throw new Error('No route found');
+    }
+    
+    const feature = data.features[0];
+    const props = feature.properties;
+    const segment = props.segments[0];
+    
+    // Convert coordinates from [lon, lat] to [lat, lon] for Leaflet
+    const geometry = feature.geometry.coordinates.map(c => [c[1], c[0]]);
+    
+    // Parse steps
+    const steps = [];
+    if (segment.steps) {
+        segment.steps.forEach(step => {
+            steps.push({
+                instruction: step.instruction,
+                distance: step.distance,
+                duration: step.duration,
+                type: mapORSType(step.type),
+                name: step.name
+            });
+        });
+    }
+    
+    return {
+        distance: props.summary.distance / 1609.34, // meters to miles
+        duration: props.summary.duration / 60, // seconds to minutes
+        geometry: geometry,
+        steps: steps,
+        source: 'ORS'
+    };
+}
+
+function mapORSType(type) {
+    const typeMap = {
+        0: 7,   // left
+        1: 3,   // right
+        2: 5,   // sharp left
+        3: 4,   // sharp right
+        4: 8,   // slight left
+        5: 2,   // slight right
+        6: 1,   // straight
+        7: 9,   // roundabout
+        8: 9,   // roundabout
+        9: 5,   // uturn
+        10: 10, // goal
+        11: 0,  // depart
+        12: 7,  // keep left
+        13: 3   // keep right
+    };
+    return typeMap[type] || 1;
+}
+
+// ==========================================
+// GRAPHHOPPER ROUTING (SECONDARY)
 // ==========================================
 
 async function fetchGraphHopperRoute(start, end, weighting = 'fastest') {
@@ -408,51 +521,45 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest') {
     url.searchParams.set('points_encoded', 'false');
     url.searchParams.set('key', CONFIG.GRAPHHOPPER_KEY);
     
-    console.log(`🔄 Fetching ${weighting} route from GraphHopper...`);
+    console.log(`🔄 Fetching GraphHopper ${weighting} route...`);
     
-    try {
-        const response = await fetch(url);
-        
-        if (!response.ok) {
-            console.warn('GraphHopper failed, falling back to OSRM');
-            return await fetchOSRMRoute(start, end);
-        }
-        
-        const data = await response.json();
-        
-        if (!data.paths || data.paths.length === 0) {
-            throw new Error('No route found');
-        }
-        
-        const path = data.paths[0];
-        
-        const steps = [];
-        if (path.instructions) {
-            for (let i = 0; i < path.instructions.length; i++) {
-                const inst = path.instructions[i];
-                steps.push({
-                    instruction: inst.text,
-                    distance: inst.distance,
-                    duration: inst.time / 1000,
-                    type: mapGraphHopperSign(inst.sign),
-                    interval: inst.interval
-                });
-            }
-        }
-        
-        const geometry = path.points.coordinates.map(c => [c[1], c[0]]);
-        
-        return {
-            distance: path.distance / 1609.34,
-            duration: path.time / 60000,
-            geometry: geometry,
-            steps: steps
-        };
-        
-    } catch (err) {
-        console.warn('GraphHopper error:', err.message, '- falling back to OSRM');
-        return await fetchOSRMRoute(start, end);
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+        throw new Error(`GraphHopper error: ${response.status}`);
     }
+    
+    const data = await response.json();
+    
+    if (!data.paths || data.paths.length === 0) {
+        throw new Error('No route found');
+    }
+    
+    const path = data.paths[0];
+    
+    const steps = [];
+    if (path.instructions) {
+        for (let i = 0; i < path.instructions.length; i++) {
+            const inst = path.instructions[i];
+            steps.push({
+                instruction: inst.text,
+                distance: inst.distance,
+                duration: inst.time / 1000,
+                type: mapGraphHopperSign(inst.sign),
+                interval: inst.interval
+            });
+        }
+    }
+    
+    const geometry = path.points.coordinates.map(c => [c[1], c[0]]);
+    
+    return {
+        distance: path.distance / 1609.34,
+        duration: path.time / 60000,
+        geometry: geometry,
+        steps: steps,
+        source: 'GraphHopper'
+    };
 }
 
 function mapGraphHopperSign(sign) {
@@ -463,7 +570,7 @@ function mapGraphHopperSign(sign) {
 }
 
 // ==========================================
-// OSRM FALLBACK
+// OSRM FALLBACK (TIME-OPTIMIZED ONLY)
 // ==========================================
 
 async function fetchOSRMRoute(start, end) {
@@ -503,7 +610,8 @@ async function fetchOSRMRoute(start, end) {
         distance: route.distance / 1609.34,
         duration: route.duration / 60,
         geometry: geometry,
-        steps: steps
+        steps: steps,
+        source: 'OSRM'
     };
 }
 
@@ -649,7 +757,6 @@ function displayTrafficMarkers() {
     state.trafficMarkers.forEach(m => state.fullscreenMap.removeLayer(m));
     state.trafficMarkers = [];
     
-    // Stop signs
     state.stopSigns.forEach(sign => {
         const marker = L.marker([sign.lat, sign.lon], {
             icon: L.divIcon({
@@ -663,7 +770,6 @@ function displayTrafficMarkers() {
         state.trafficMarkers.push(marker);
     });
     
-    // Traffic signals
     state.trafficSignals.forEach(signal => {
         const marker = L.marker([signal.lat, signal.lon], {
             icon: L.divIcon({
@@ -728,27 +834,32 @@ function drawRoutes(shortest, fastest) {
     if (state.fastestRouteLayer) state.map.removeLayer(state.fastestRouteLayer);
     
     const distDiff = Math.abs(fastest.distance - shortest.distance);
-    if (distDiff > 0.1) {
-        state.fastestRouteLayer = L.polyline(fastest.geometry, {
-            color: '#dc2626',
-            weight: 6,
-            opacity: 0.7,
-            dashArray: '10, 10'
-        }).addTo(state.map);
-    }
     
+    // Always draw fastest route first (underneath) - BRIGHT RED, THICK
+    state.fastestRouteLayer = L.polyline(fastest.geometry, {
+        color: '#dc2626',
+        weight: 7,
+        opacity: 0.9,
+        dashArray: '12, 8'
+    }).addTo(state.map);
+    
+    // Draw shortest route on top - SOLID BLUE
     state.shortestRouteLayer = L.polyline(shortest.geometry, {
         color: '#2563eb',
         weight: 6,
-        opacity: 0.9
+        opacity: 1
     }).addTo(state.map);
     
     document.getElementById('map-legend').classList.remove('hidden');
     document.getElementById('recenter-btn').classList.remove('hidden');
     
-    const allCoords = [...shortest.geometry];
-    if (distDiff > 0.1) allCoords.push(...fastest.geometry);
+    // Fit bounds to show both routes
+    const allCoords = [...shortest.geometry, ...fastest.geometry];
     state.map.fitBounds(L.latLngBounds(allCoords), { padding: [50, 50], maxZoom: 14 });
+    
+    // Log route sources for debugging
+    console.log(`📍 Shortest route source: ${shortest.source || 'unknown'}`);
+    console.log(`📍 Fastest route source: ${fastest.source || 'unknown'}`);
 }
 
 // ==========================================
@@ -832,21 +943,21 @@ function showDirections(routeType) {
 
 function closeDirections() {
     document.getElementById('directions-panel').classList.add('hidden');
-    if (state.shortestRouteLayer) state.shortestRouteLayer.setStyle({ opacity: 0.9, weight: 6 });
-    if (state.fastestRouteLayer) state.fastestRouteLayer.setStyle({ opacity: 0.7, weight: 6 });
+    if (state.shortestRouteLayer) state.shortestRouteLayer.setStyle({ opacity: 1, weight: 6 });
+    if (state.fastestRouteLayer) state.fastestRouteLayer.setStyle({ opacity: 0.9, weight: 7 });
 }
 
 function highlightRoute(routeType) {
     if (state.shortestRouteLayer) {
         state.shortestRouteLayer.setStyle({ 
-            opacity: routeType === 'shortest' ? 1 : 0.3, 
+            opacity: routeType === 'shortest' ? 1 : 0.4, 
             weight: routeType === 'shortest' ? 8 : 4 
         });
     }
     if (state.fastestRouteLayer) {
         state.fastestRouteLayer.setStyle({ 
-            opacity: routeType === 'fastest' ? 1 : 0.3, 
-            weight: routeType === 'fastest' ? 8 : 4 
+            opacity: routeType === 'fastest' ? 1 : 0.4, 
+            weight: routeType === 'fastest' ? 9 : 5 
         });
     }
 }
@@ -1325,7 +1436,7 @@ async function performReroute() {
     document.getElementById('rerouting-toast').classList.remove('hidden');
     
     try {
-        const route = await fetchGraphHopperRoute(state.currentUserLocation, state.endCoords, 'short_fastest');
+        const route = await fetchRoute(state.currentUserLocation, state.endCoords, 'shortest');
         
         if (state.fullscreenRouteLayer) state.fullscreenMap.removeLayer(state.fullscreenRouteLayer);
         
@@ -1353,7 +1464,7 @@ async function performReroute() {
         
         fetchTrafficData(route.geometry);
         
-        console.log('✓ Rerouted');
+        console.log('✓ Rerouted via', route.source);
     } catch (err) {
         console.error('Reroute failed:', err);
     } finally {
