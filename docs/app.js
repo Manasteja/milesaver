@@ -1,44 +1,51 @@
 /**
- * MileSaver v12 - POLISHED NAVIGATION
+ * MileSaver v14 - FULL ENHANCEMENT SUITE
  * 
- * ROUTING STRATEGY:
- * 1. PRIMARY: OpenRouteService via Cloudflare proxy (supports true shortest distance)
- * 2. SECONDARY: GraphHopper (if ORS fails)
- * 3. FALLBACK: OSRM (time-optimized only)
+ * ROUTING: ORS → GraphHopper → OSRM
  * 
- * v12 FIXES:
- * - Smarter turn instructions ("Continue on..." when already on road)
- * - Traffic markers limited to 0.5 mile radius around user
- * - Improved time calculation accuracy
- * - Car icon points in direction of movement
- * - Position snapping to route for better accuracy
+ * v14 ENHANCEMENTS (on top of v13 fixes):
+ * 1.  Voice turn-by-turn prompts (Web Speech API) with 500m / 200m / at-turn stages
+ * 2.  Route progress visualization (gray completed / blue remaining polylines)
+ * 3.  Segment-projection snap-to-route (not just nearest vertex)
+ * 4.  Offline resilience (graceful reroute failure, cached active route)
+ * 5.  Wrong-way detection (heading vs route bearing comparison)
+ * 6.  Monotonic step advancement (no backward jumps)
+ * 7.  Overpass traffic-data caching (avoids redundant API calls)
+ * 8.  Night mode (auto-detect + toggle, CartoDB dark tiles)
+ * 9.  Trip history with cumulative savings (localStorage)
+ * 10. Adaptive GPS intervals (tighter near turns, relaxed on straights)
+ * 11. ARIA live regions for screen-reader accessibility
+ * 12. All v13 fixes preserved (touch/swipe, car icon, distance tracking, etc.)
  */
 
 const CONFIG = {
-    // PRIMARY: OpenRouteService via Cloudflare Worker proxy (supports TRUE shortest)
     ORS_PROXY_URL: 'https://milesaver-ors-proxy.teja-katakam.workers.dev',
-    
-    // SECONDARY: GraphHopper
     GRAPHHOPPER_URL: 'https://graphhopper.com/api/1/route',
     GRAPHHOPPER_KEY: '2511f66d-11d1-4b14-804a-57977321e912',
-    
-    // FALLBACK: OSRM (time-optimized only)
     OSRM_URL: 'https://router.project-osrm.org/route/v1/driving',
-    
-    // Google API
     GOOGLE_API_KEY: 'AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0',
-    
-    // Other APIs
     NOMINATIM_URL: 'https://nominatim.openstreetmap.org',
     ELEVATION_URL: 'https://api.open-elevation.com/api/v1/lookup',
     OVERPASS_URL: 'https://overpass-api.de/api/interpreter',
-    
-    // Navigation thresholds
+
     OFF_ROUTE_THRESHOLD: 80,
     DESTINATION_THRESHOLD: 50,
     REROUTE_COOLDOWN: 15000,
-    TRAFFIC_MARKER_RADIUS: 805, // 0.5 miles in meters
-    ROUTE_SNAP_THRESHOLD: 30, // meters - snap to route if within this distance
+    TRAFFIC_MARKER_RADIUS: 805,
+    ROUTE_SNAP_THRESHOLD: 30,
+
+    // Voice prompt distance thresholds (meters)
+    VOICE_FAR: 500,
+    VOICE_NEAR: 200,
+    VOICE_NOW: 40,
+
+    // Wrong-way detection
+    WRONG_WAY_ANGLE: 120, // degrees off-bearing to trigger
+    WRONG_WAY_SPEED: 3,   // m/s minimum speed to evaluate
+
+    // Tile providers
+    LIGHT_TILES: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    DARK_TILES: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
 };
 
 const state = {
@@ -50,7 +57,8 @@ const state = {
     userAccuracyCircle: null,
     fullscreenUserMarker: null,
     fullscreenAccuracyCircle: null,
-    fullscreenRouteLayer: null,
+    fullscreenRouteLayer: null,      // remaining (blue)
+    fullscreenCompletedLayer: null,   // completed (gray) — NEW
     shortestRouteLayer: null,
     fastestRouteLayer: null,
     trafficMarkers: [],
@@ -62,14 +70,13 @@ const state = {
     activeRouteCoords: [],
     activeRouteSteps: [],
     stepCumulativeDistance: [],
-    stepEndPoints: [], // Track where each step ends on the route
     gpsWatchId: null,
     googleStartCoords: null,
     googleEndCoords: null,
     currentUserLocation: null,
     currentSpeed: 0,
     currentHeading: 0,
-    lastValidHeading: 0, // Track last valid heading for car icon
+    lastValidHeading: 0,
     isNavigating: false,
     isFollowMode: true,
     isPanning: false,
@@ -84,8 +91,26 @@ const state = {
     trafficSignals: [],
     speedLimitData: [],
     currentSpeedLimit: null,
-    routeAvgSpeed: 30, // Average speed for the route in mph (updated from route data)
-    currentRoadName: '', // Track current road for smarter instructions
+    routeAvgSpeed: 30,
+    currentRoadName: '',
+    activeRouteTotalDistance: 0,
+    activeRouteDuration: 0,
+    destinationMarker: null,
+    _wakeLockListenerAdded: false,
+
+    // v14 new state
+    voiceEnabled: true,
+    lastVoiceStepIndex: -1,
+    lastVoiceStage: '',       // 'far' | 'near' | 'now'
+    nightMode: 'auto',        // 'auto' | 'on' | 'off'
+    isNightActive: false,
+    fullscreenTileLayer: null,
+    mainTileLayer: null,
+    minProgressIndex: 0,       // monotonic advancement
+    overpassCache: {},          // keyed by bounds hash
+    tripHistory: [],
+    navStartTime: null,
+    wrongWayCount: 0,
 };
 
 // ==========================================
@@ -95,9 +120,12 @@ const state = {
 document.addEventListener('DOMContentLoaded', initializeApp);
 
 function initializeApp() {
+    loadTripHistory();
+    detectNightMode();
+
     initializeMap();
     setTimeout(initializeAutocomplete, 500);
-    
+
     document.getElementById('search-btn').addEventListener('click', handleSearch);
     document.getElementById('close-directions').addEventListener('click', closeDirections);
     document.getElementById('recenter-btn').addEventListener('click', recenterOnUser);
@@ -108,30 +136,34 @@ function initializeApp() {
     document.getElementById('exit-nav-btn').addEventListener('click', exitFullscreenNavigation);
     document.getElementById('fullscreen-recenter-btn').addEventListener('click', recenterFullscreenMap);
     document.getElementById('toggle-north-btn').addEventListener('click', toggleNorthUp);
-    
+    document.getElementById('toggle-voice-btn').addEventListener('click', toggleVoice);
+    document.getElementById('toggle-night-btn').addEventListener('click', toggleNightMode);
+    document.getElementById('clear-history-btn')?.addEventListener('click', clearTripHistory);
+
     document.querySelectorAll('.route-card-compact').forEach(card => {
         card.addEventListener('click', () => {
             state.selectedRoute = card.dataset.route;
             showDirections(card.dataset.route);
         });
     });
-    
+
     document.querySelectorAll('input[name="input-mode"]').forEach(input => {
         input.addEventListener('change', handleInputModeChange);
     });
-    
+
     setupSliders();
-    
+
     document.getElementById('start-location').addEventListener('input', () => state.googleStartCoords = null);
     document.getElementById('end-location').addEventListener('input', () => state.googleEndCoords = null);
-    
-    console.log('✅ MileSaver v12 initialized (polished navigation)');
+
+    renderTripHistory();
+    console.log('MileSaver v14 initialized');
 }
 
 function initializeMap() {
     state.map = L.map('map', { zoomControl: true }).setView([47.6062, -122.3321], 10);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap',
+    state.mainTileLayer = L.tileLayer(getCurrentTileUrl(), {
+        attribution: '© OpenStreetMap © CartoDB',
         maxZoom: 19
     }).addTo(state.map);
 }
@@ -161,23 +193,178 @@ function handleInputModeChange(e) {
 }
 
 // ==========================================
+// NIGHT MODE (Enhancement #8)
+// ==========================================
+
+function getCurrentTileUrl() {
+    return state.isNightActive ? CONFIG.DARK_TILES : CONFIG.LIGHT_TILES;
+}
+
+function detectNightMode() {
+    if (state.nightMode === 'auto') {
+        const hour = new Date().getHours();
+        state.isNightActive = (hour >= 19 || hour < 6);
+    } else {
+        state.isNightActive = (state.nightMode === 'on');
+    }
+    document.body.classList.toggle('night-mode', state.isNightActive);
+}
+
+function toggleNightMode() {
+    const modes = ['auto', 'on', 'off'];
+    const idx = modes.indexOf(state.nightMode);
+    state.nightMode = modes[(idx + 1) % 3];
+
+    detectNightMode();
+    applyTiles();
+
+    const btn = document.getElementById('toggle-night-btn');
+    const labels = { auto: '🌗', on: '🌙', off: '☀️' };
+    btn.textContent = labels[state.nightMode];
+    btn.title = `Night mode: ${state.nightMode}`;
+}
+
+function applyTiles() {
+    const url = getCurrentTileUrl();
+    if (state.mainTileLayer) {
+        state.mainTileLayer.setUrl(url);
+    }
+    if (state.fullscreenTileLayer) {
+        state.fullscreenTileLayer.setUrl(url);
+    }
+}
+
+// ==========================================
+// VOICE NAVIGATION (Enhancement #1)
+// ==========================================
+
+function toggleVoice() {
+    state.voiceEnabled = !state.voiceEnabled;
+    const btn = document.getElementById('toggle-voice-btn');
+    btn.classList.toggle('active', state.voiceEnabled);
+    btn.textContent = state.voiceEnabled ? '🔊' : '🔇';
+
+    if (!state.voiceEnabled) {
+        window.speechSynthesis?.cancel();
+    }
+}
+
+function speak(text) {
+    if (!state.voiceEnabled || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.05;
+    u.pitch = 1;
+    u.lang = 'en-US';
+    window.speechSynthesis.speak(u);
+}
+
+function speakDirection(instruction, distanceMeters) {
+    if (!state.voiceEnabled) return;
+
+    const stepIdx = state.currentStepIndex;
+    let stage = '';
+    if (distanceMeters > CONFIG.VOICE_FAR) return;
+    if (distanceMeters > CONFIG.VOICE_NEAR) stage = 'far';
+    else if (distanceMeters > CONFIG.VOICE_NOW) stage = 'near';
+    else stage = 'now';
+
+    // Don't repeat the same announcement
+    if (stepIdx === state.lastVoiceStepIndex && stage === state.lastVoiceStage) return;
+    state.lastVoiceStepIndex = stepIdx;
+    state.lastVoiceStage = stage;
+
+    const cleanInstruction = instruction.replace(/^Head\s+\w+\s+on\s+/i, 'Head on ');
+    if (stage === 'far') {
+        const distText = distanceMeters > 400 ? 'In a quarter mile' : `In ${Math.round(distanceMeters)} meters`;
+        speak(`${distText}, ${cleanInstruction}`);
+    } else if (stage === 'near') {
+        speak(`In 200 meters, ${cleanInstruction}`);
+    } else {
+        speak(cleanInstruction);
+    }
+}
+
+// ==========================================
+// TRIP HISTORY (Enhancement #9)
+// ==========================================
+
+function loadTripHistory() {
+    try {
+        state.tripHistory = JSON.parse(localStorage.getItem('milesaver_trips') || '[]');
+    } catch { state.tripHistory = []; }
+}
+
+function saveTripHistory() {
+    try {
+        // Keep last 50 trips
+        const trimmed = state.tripHistory.slice(-50);
+        localStorage.setItem('milesaver_trips', JSON.stringify(trimmed));
+    } catch (e) { console.warn('Trip save failed:', e); }
+}
+
+function logTrip(routeData, milesSaved) {
+    const trip = {
+        date: new Date().toISOString(),
+        distance: routeData.distance,
+        duration: routeData.duration,
+        milesSaved: Math.max(0, milesSaved),
+        source: routeData.source
+    };
+    state.tripHistory.push(trip);
+    saveTripHistory();
+    renderTripHistory();
+}
+
+function renderTripHistory() {
+    const container = document.getElementById('trip-history-list');
+    const statsEl = document.getElementById('history-stats');
+    if (!container) return;
+
+    if (state.tripHistory.length === 0) {
+        container.innerHTML = '<p class="history-empty">No trips yet. Navigate a route to start tracking!</p>';
+        if (statsEl) statsEl.textContent = '';
+        return;
+    }
+
+    const totalSaved = state.tripHistory.reduce((s, t) => s + (t.milesSaved || 0), 0);
+    const costPerMile = parseFloat(document.getElementById('cost-per-mile')?.value || 0.25);
+
+    if (statsEl) {
+        statsEl.textContent = `${state.tripHistory.length} trips · ${totalSaved.toFixed(1)} mi saved · $${(totalSaved * costPerMile).toFixed(2)} saved`;
+    }
+
+    const recent = state.tripHistory.slice(-5).reverse();
+    container.innerHTML = recent.map(t => {
+        const d = new Date(t.date);
+        const dateStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        return `<div class="history-row"><span>${dateStr}</span><span>${t.distance.toFixed(1)} mi</span><span class="history-saved">-${t.milesSaved.toFixed(1)} mi</span></div>`;
+    }).join('');
+}
+
+function clearTripHistory() {
+    if (!confirm('Clear all trip history?')) return;
+    state.tripHistory = [];
+    saveTripHistory();
+    renderTripHistory();
+}
+
+// ==========================================
 // SWAP LOCATIONS
 // ==========================================
 
 function swapLocations() {
     const mode = document.querySelector('input[name="input-mode"]:checked').value;
-    
     if (mode === 'coordinates') {
-        const startInput = document.getElementById('start-coords');
-        const endInput = document.getElementById('end-coords');
-        [startInput.value, endInput.value] = [endInput.value, startInput.value];
+        const s = document.getElementById('start-coords');
+        const e = document.getElementById('end-coords');
+        [s.value, e.value] = [e.value, s.value];
     } else {
-        const startInput = document.getElementById('start-location');
-        const endInput = document.getElementById('end-location');
-        [startInput.value, endInput.value] = [endInput.value, startInput.value];
+        const s = document.getElementById('start-location');
+        const e = document.getElementById('end-location');
+        [s.value, e.value] = [e.value, s.value];
         [state.googleStartCoords, state.googleEndCoords] = [state.googleEndCoords, state.googleStartCoords];
     }
-    
     const btn = document.getElementById('swap-btn');
     btn.classList.add('swapping');
     setTimeout(() => btn.classList.remove('swapping'), 300);
@@ -189,34 +376,22 @@ function swapLocations() {
 
 function initializeAutocomplete() {
     if (typeof google === 'undefined' || !google.maps?.places) {
-        console.warn('Google Maps not loaded - autocomplete disabled');
+        console.warn('Google Maps not loaded – autocomplete disabled');
         return;
     }
-    
     const options = { types: ['geocode', 'establishment'], componentRestrictions: { country: 'us' } };
-    
     try {
         const startAC = new google.maps.places.Autocomplete(document.getElementById('start-location'), options);
         const endAC = new google.maps.places.Autocomplete(document.getElementById('end-location'), options);
-        
         startAC.addListener('place_changed', () => {
-            const place = startAC.getPlace();
-            if (place.geometry) {
-                state.googleStartCoords = { lat: place.geometry.location.lat(), lon: place.geometry.location.lng() };
-            }
+            const p = startAC.getPlace();
+            if (p.geometry) state.googleStartCoords = { lat: p.geometry.location.lat(), lon: p.geometry.location.lng() };
         });
-        
         endAC.addListener('place_changed', () => {
-            const place = endAC.getPlace();
-            if (place.geometry) {
-                state.googleEndCoords = { lat: place.geometry.location.lat(), lon: place.geometry.location.lng() };
-            }
+            const p = endAC.getPlace();
+            if (p.geometry) state.googleEndCoords = { lat: p.geometry.location.lat(), lon: p.geometry.location.lng() };
         });
-        
-        console.log('✓ Google Autocomplete enabled');
-    } catch (err) {
-        console.warn('Autocomplete error:', err);
-    }
+    } catch (err) { console.warn('Autocomplete error:', err); }
 }
 
 // ==========================================
@@ -225,40 +400,27 @@ function initializeAutocomplete() {
 
 function useMyLocationForStart() {
     const btn = document.getElementById('use-my-location-btn');
-    btn.textContent = '⏳';
-    btn.disabled = true;
-    
+    btn.textContent = '⏳'; btn.disabled = true;
     navigator.geolocation.getCurrentPosition(
         async (pos) => {
             const { latitude: lat, longitude: lon } = pos.coords;
             state.googleStartCoords = { lat, lon };
             state.currentUserLocation = { lat, lon };
-            
             try {
-                const address = await reverseGeocode(lat, lon);
-                document.getElementById('start-location').value = address;
-            } catch {
-                document.getElementById('start-location').value = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
-            }
-            
+                document.getElementById('start-location').value = await reverseGeocode(lat, lon);
+            } catch { document.getElementById('start-location').value = `${lat.toFixed(6)}, ${lon.toFixed(6)}`; }
             btn.textContent = '✓';
             setTimeout(() => { btn.textContent = '📍'; btn.disabled = false; }, 1000);
             state.map.setView([lat, lon], 14);
         },
-        (err) => {
-            showError('Location error: ' + err.message);
-            btn.textContent = '📍';
-            btn.disabled = false;
-        },
+        (err) => { showError('Location error: ' + err.message); btn.textContent = '📍'; btn.disabled = false; },
         { enableHighAccuracy: true, timeout: 10000 }
     );
 }
 
 function useMyLocationForStartCoords() {
     const btn = document.getElementById('use-my-location-coords-btn');
-    btn.textContent = '⏳';
-    btn.disabled = true;
-    
+    btn.textContent = '⏳'; btn.disabled = true;
     navigator.geolocation.getCurrentPosition(
         (pos) => {
             const { latitude: lat, longitude: lon } = pos.coords;
@@ -268,11 +430,7 @@ function useMyLocationForStartCoords() {
             setTimeout(() => { btn.textContent = '📍'; btn.disabled = false; }, 1000);
             state.map.setView([lat, lon], 14);
         },
-        (err) => {
-            showError('Location error: ' + err.message);
-            btn.textContent = '📍';
-            btn.disabled = false;
-        },
+        (err) => { showError('Location error: ' + err.message); btn.textContent = '📍'; btn.disabled = false; },
         { enableHighAccuracy: true, timeout: 10000 }
     );
 }
@@ -282,11 +440,8 @@ async function reverseGeocode(lat, lon) {
         const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lon}&key=${CONFIG.GOOGLE_API_KEY}`;
         const res = await fetch(url);
         const data = await res.json();
-        if (data.status === 'OK' && data.results[0]) {
-            return data.results[0].formatted_address;
-        }
+        if (data.status === 'OK' && data.results[0]) return data.results[0].formatted_address;
     } catch {}
-    
     const url = `${CONFIG.NOMINATIM_URL}/reverse?format=json&lat=${lat}&lon=${lon}`;
     const res = await fetch(url, { headers: { 'User-Agent': 'MileSaver' } });
     const data = await res.json();
@@ -298,11 +453,8 @@ async function reverseGeocode(lat, lon) {
 // ==========================================
 
 async function geocodeAddress(address) {
-    const coordMatch = address.match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
-    if (coordMatch) {
-        return { lat: parseFloat(coordMatch[1]), lon: parseFloat(coordMatch[2]) };
-    }
-    
+    const m = address.match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
+    if (m) return { lat: parseFloat(m[1]), lon: parseFloat(m[2]) };
     try {
         const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${CONFIG.GOOGLE_API_KEY}`;
         const res = await fetch(url);
@@ -311,17 +463,11 @@ async function geocodeAddress(address) {
             const loc = data.results[0].geometry.location;
             return { lat: loc.lat, lon: loc.lng };
         }
-    } catch (err) {
-        console.warn('Google geocode failed:', err);
-    }
-    
+    } catch (err) { console.warn('Google geocode failed:', err); }
     const url = `${CONFIG.NOMINATIM_URL}/search?format=json&q=${encodeURIComponent(address)}&limit=1`;
     const res = await fetch(url, { headers: { 'User-Agent': 'MileSaver' } });
     const data = await res.json();
-    if (data[0]) {
-        return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
-    }
-    
+    if (data[0]) return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
     throw new Error(`Could not find: "${address}"`);
 }
 
@@ -331,80 +477,52 @@ async function geocodeAddress(address) {
 
 async function handleSearch() {
     try {
-        showLoading();
-        hideError();
-        hideResults();
-        closeDirections();
-        
+        showLoading(); hideError(); hideResults(); closeDirections();
         const mode = document.querySelector('input[name="input-mode"]:checked').value;
         let start, end;
-        
         if (mode === 'coordinates') {
-            const startVal = document.getElementById('start-coords').value.trim();
-            const endVal = document.getElementById('end-coords').value.trim();
-            if (!startVal || !endVal) throw new Error('Enter both coordinates');
-            
-            const startMatch = startVal.match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
-            const endMatch = endVal.match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
-            if (!startMatch || !endMatch) throw new Error('Invalid coordinate format');
-            
-            start = { lat: parseFloat(startMatch[1]), lon: parseFloat(startMatch[2]) };
-            end = { lat: parseFloat(endMatch[1]), lon: parseFloat(endMatch[2]) };
+            const sv = document.getElementById('start-coords').value.trim();
+            const ev = document.getElementById('end-coords').value.trim();
+            if (!sv || !ev) throw new Error('Enter both coordinates');
+            const sm = sv.match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
+            const em = ev.match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
+            if (!sm || !em) throw new Error('Invalid coordinate format');
+            start = { lat: parseFloat(sm[1]), lon: parseFloat(sm[2]) };
+            end = { lat: parseFloat(em[1]), lon: parseFloat(em[2]) };
         } else {
-            const startLoc = document.getElementById('start-location').value.trim();
-            const endLoc = document.getElementById('end-location').value.trim();
-            if (!startLoc || !endLoc) throw new Error('Enter both locations');
-            
-            start = state.googleStartCoords || await geocodeAddress(startLoc);
-            end = state.googleEndCoords || await geocodeAddress(endLoc);
+            const sl = document.getElementById('start-location').value.trim();
+            const el = document.getElementById('end-location').value.trim();
+            if (!sl || !el) throw new Error('Enter both locations');
+            start = state.googleStartCoords || await geocodeAddress(sl);
+            end = state.googleEndCoords || await geocodeAddress(el);
         }
-        
-        console.log('📍 Start:', start);
-        console.log('📍 End:', end);
-        
         state.startCoords = start;
         state.endCoords = end;
-        
         addMarkers(start, end);
-        
-        // Fetch BOTH shortest (by distance) and fastest (by time) routes
+
         const [shortestRoute, fastestRoute] = await Promise.all([
             fetchRoute(start, end, 'shortest'),
             fetchRoute(start, end, 'fastest')
         ]);
-        
         state.shortestRouteData = shortestRoute;
         state.fastestRouteData = fastestRoute;
         state.routesAnalyzed = 2;
-        
-        // Calculate average speed from route data for better time estimates
         if (shortestRoute.distance > 0 && shortestRoute.duration > 0) {
-            state.routeAvgSpeed = (shortestRoute.distance / shortestRoute.duration) * 60; // mph
+            state.routeAvgSpeed = (shortestRoute.distance / shortestRoute.duration) * 60;
         }
-        
-        console.log('✓ Shortest:', shortestRoute.distance.toFixed(2), 'mi,', Math.round(shortestRoute.duration), 'min');
-        console.log('✓ Fastest:', fastestRoute.distance.toFixed(2), 'mi,', Math.round(fastestRoute.duration), 'min');
-        console.log('✓ Route avg speed:', state.routeAvgSpeed.toFixed(1), 'mph');
-        
         const comparison = {
-            shortestRoute: shortestRoute,
-            fastestRoute: fastestRoute,
+            shortestRoute, fastestRoute,
             milesSaved: fastestRoute.distance - shortestRoute.distance,
             extraTime: shortestRoute.duration - fastestRoute.duration
         };
-        
         state.routeComparison = comparison;
         drawRoutes(shortestRoute, fastestRoute);
         displayResults(comparison);
-        
         fetchBothElevations(start, end);
-        
     } catch (error) {
         console.error('Search error:', error);
         showError(error.message);
-    } finally {
-        hideLoading();
-    }
+    } finally { hideLoading(); }
 }
 
 // ==========================================
@@ -412,102 +530,54 @@ async function handleSearch() {
 // ==========================================
 
 async function fetchRoute(start, end, preference) {
-    // Try ORS proxy first (supports true shortest distance)
     try {
         const route = await fetchORSRoute(start, end, preference);
-        console.log(`✓ ORS ${preference} route successful`);
         return route;
-    } catch (err) {
-        console.warn(`ORS ${preference} failed:`, err.message);
-    }
-    
-    // Try GraphHopper second
+    } catch (err) { console.warn(`ORS ${preference} failed:`, err.message); }
     try {
-        const weighting = preference === 'shortest' ? 'short_fastest' : 'fastest';
-        const route = await fetchGraphHopperRoute(start, end, weighting);
-        console.log(`✓ GraphHopper ${weighting} route successful`);
-        return route;
-    } catch (err) {
-        console.warn(`GraphHopper failed:`, err.message);
-    }
-    
-    // Fallback to OSRM (time-only, but at least works)
-    console.log('⚠️ Falling back to OSRM (time-optimized only)');
+        const w = preference === 'shortest' ? 'short_fastest' : 'fastest';
+        return await fetchGraphHopperRoute(start, end, w);
+    } catch (err) { console.warn('GraphHopper failed:', err.message); }
     return await fetchOSRMRoute(start, end);
 }
 
 // ==========================================
-// ORS ROUTING VIA CLOUDFLARE PROXY (PRIMARY)
+// ORS ROUTING VIA CLOUDFLARE PROXY
 // ==========================================
 
 async function fetchORSRoute(start, end, preference = 'fastest') {
-    console.log(`🔄 Fetching ORS ${preference} route via proxy...`);
-    
     const response = await fetch(CONFIG.ORS_PROXY_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            coordinates: [
-                [start.lon, start.lat],
-                [end.lon, end.lat]
-            ],
-            preference: preference,
-            instructions: true,
-            units: 'm'
+            coordinates: [[start.lon, start.lat], [end.lon, end.lat]],
+            preference, instructions: true, units: 'm'
         })
     });
-    
-    if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`ORS error ${response.status}: ${text}`);
-    }
-    
+    if (!response.ok) throw new Error(`ORS error ${response.status}`);
     const data = await response.json();
-    
-    if (!data.features || data.features.length === 0) {
-        throw new Error('No route found');
-    }
-    
+    if (!data.features?.length) throw new Error('No route found');
     const feature = data.features[0];
-    const props = feature.properties;
-    const segment = props.segments[0];
-    
-    // Convert coordinates from [lon, lat] to [lat, lon] for Leaflet
+    const segment = feature.properties.segments[0];
     const geometry = feature.geometry.coordinates.map(c => [c[1], c[0]]);
-    
-    // Parse steps with road names for smarter instructions
-    const steps = [];
-    if (segment.steps) {
-        segment.steps.forEach(step => {
-            steps.push({
-                instruction: step.instruction,
-                distance: step.distance,
-                duration: step.duration,
-                type: mapORSType(step.type),
-                name: step.name || '',
-                wayPoints: step.way_points // Start and end indices in geometry
-            });
-        });
-    }
-    
+    const steps = (segment.steps || []).map(s => ({
+        instruction: s.instruction, distance: s.distance, duration: s.duration,
+        type: mapORSType(s.type), name: s.name || '', wayPoints: s.way_points
+    }));
     return {
-        distance: props.summary.distance / 1609.34,
-        duration: props.summary.duration / 60,
-        geometry: geometry,
-        steps: steps,
-        source: 'ORS'
+        distance: feature.properties.summary.distance / 1609.34,
+        duration: feature.properties.summary.duration / 60,
+        geometry, steps, source: 'ORS'
     };
 }
 
 function mapORSType(type) {
-    const typeMap = {
-        0: 7, 1: 3, 2: 5, 3: 4, 4: 8, 5: 2, 6: 1, 7: 9, 8: 9, 9: 5, 10: 10, 11: 0, 12: 7, 13: 3
-    };
-    return typeMap[type] || 1;
+    const m = { 0:7,1:3,2:5,3:4,4:8,5:2,6:1,7:9,8:9,9:5,10:10,11:0,12:7,13:3 };
+    return m[type] || 1;
 }
 
 // ==========================================
-// GRAPHHOPPER ROUTING (SECONDARY)
+// GRAPHHOPPER ROUTING
 // ==========================================
 
 async function fetchGraphHopperRoute(start, end, weighting = 'fastest') {
@@ -519,301 +589,164 @@ async function fetchGraphHopperRoute(start, end, weighting = 'fastest') {
     url.searchParams.set('instructions', 'true');
     url.searchParams.set('points_encoded', 'false');
     url.searchParams.set('key', CONFIG.GRAPHHOPPER_KEY);
-    
-    console.log(`🔄 Fetching GraphHopper ${weighting} route...`);
-    
     const response = await fetch(url);
-    
-    if (!response.ok) {
-        throw new Error(`GraphHopper error: ${response.status}`);
-    }
-    
+    if (!response.ok) throw new Error(`GraphHopper error: ${response.status}`);
     const data = await response.json();
-    
-    if (!data.paths || data.paths.length === 0) {
-        throw new Error('No route found');
-    }
-    
+    if (!data.paths?.length) throw new Error('No route found');
     const path = data.paths[0];
-    
-    const steps = [];
-    if (path.instructions) {
-        for (let i = 0; i < path.instructions.length; i++) {
-            const inst = path.instructions[i];
-            steps.push({
-                instruction: inst.text,
-                distance: inst.distance,
-                duration: inst.time / 1000,
-                type: mapGraphHopperSign(inst.sign),
-                name: inst.street_name || '',
-                interval: inst.interval
-            });
-        }
-    }
-    
+    const steps = (path.instructions || []).map(inst => ({
+        instruction: inst.text, distance: inst.distance, duration: inst.time / 1000,
+        type: mapGHSign(inst.sign), name: inst.street_name || '', interval: inst.interval
+    }));
     const geometry = path.points.coordinates.map(c => [c[1], c[0]]);
-    
-    return {
-        distance: path.distance / 1609.34,
-        duration: path.time / 60000,
-        geometry: geometry,
-        steps: steps,
-        source: 'GraphHopper'
-    };
+    return { distance: path.distance / 1609.34, duration: path.time / 60000, geometry, steps, source: 'GraphHopper' };
 }
 
-function mapGraphHopperSign(sign) {
-    const signMap = {
-        '-3': 5, '-2': 7, '-1': 8, '0': 1, '1': 2, '2': 3, '3': 4, '4': 10, '5': 10, '6': 9,
-    };
-    return signMap[String(sign)] || 1;
+function mapGHSign(sign) {
+    const m = { '-3':5,'-2':7,'-1':8,'0':1,'1':2,'2':3,'3':4,'4':10,'5':10,'6':9 };
+    return m[String(sign)] || 1;
 }
 
 // ==========================================
-// OSRM FALLBACK (TIME-OPTIMIZED ONLY)
+// OSRM FALLBACK
 // ==========================================
 
 async function fetchOSRMRoute(start, end) {
     const coords = `${start.lon},${start.lat};${end.lon},${end.lat}`;
     const url = `${CONFIG.OSRM_URL}/${coords}?overview=full&geometries=geojson&steps=true`;
-    
-    console.log('🔄 Fetching OSRM route...');
-    
     const response = await fetch(url);
     if (!response.ok) throw new Error(`OSRM error: ${response.status}`);
-    
     const data = await response.json();
     if (data.code !== 'Ok' || !data.routes?.length) throw new Error('No route found');
-    
     const route = data.routes[0];
-    
     const steps = [];
-    if (route.legs) {
-        route.legs.forEach(leg => {
-            if (leg.steps) {
-                leg.steps.forEach(step => {
-                    steps.push({
-                        instruction: formatOSRMInstruction(step),
-                        distance: step.distance,
-                        duration: step.duration,
-                        type: getOSRMStepType(step.maneuver?.type, step.maneuver?.modifier),
-                        name: step.name || '',
-                        location: step.maneuver?.location
-                    });
-                });
-            }
+    route.legs?.forEach(leg => {
+        leg.steps?.forEach(step => {
+            steps.push({
+                instruction: formatOSRMInstruction(step), distance: step.distance,
+                duration: step.duration, type: getOSRMStepType(step.maneuver?.type, step.maneuver?.modifier),
+                name: step.name || '', location: step.maneuver?.location
+            });
         });
-    }
-    
+    });
     const geometry = route.geometry.coordinates.map(c => [c[1], c[0]]);
-    
-    return {
-        distance: route.distance / 1609.34,
-        duration: route.duration / 60,
-        geometry: geometry,
-        steps: steps,
-        source: 'OSRM'
-    };
+    return { distance: route.distance / 1609.34, duration: route.duration / 60, geometry, steps, source: 'OSRM' };
 }
 
 function formatOSRMInstruction(step) {
     const m = step.maneuver;
     if (!m) return step.name || 'Continue';
-    
-    const type = m.type;
-    const mod = m.modifier;
+    const { type, modifier: mod } = m;
     const name = step.name || 'the road';
-    
     if (type === 'depart') return `Head ${mod || 'straight'} on ${name}`;
     if (type === 'arrive') return 'Arrive at your destination';
     if (type === 'turn') {
-        if (mod === 'left') return `Turn left onto ${name}`;
-        if (mod === 'right') return `Turn right onto ${name}`;
-        if (mod === 'slight left') return `Slight left onto ${name}`;
-        if (mod === 'slight right') return `Slight right onto ${name}`;
-        if (mod === 'sharp left') return `Sharp left onto ${name}`;
-        if (mod === 'sharp right') return `Sharp right onto ${name}`;
-        if (mod === 'uturn') return `Make a U-turn`;
+        const dirs = { 'left':'Turn left onto','right':'Turn right onto','slight left':'Slight left onto','slight right':'Slight right onto','sharp left':'Sharp left onto','sharp right':'Sharp right onto','uturn':'Make a U-turn' };
+        if (dirs[mod]) return mod === 'uturn' ? dirs[mod] : `${dirs[mod]} ${name}`;
     }
     if (type === 'merge') return `Merge onto ${name}`;
     if (type === 'fork') return mod?.includes('left') ? `Keep left onto ${name}` : `Keep right onto ${name}`;
     if (type === 'roundabout') return `At roundabout, exit onto ${name}`;
-    
     return `Continue on ${name}`;
 }
 
 function getOSRMStepType(type, mod) {
     if (type === 'depart') return 0;
     if (type === 'arrive') return 10;
-    if (type === 'turn') {
-        if (mod?.includes('left')) return 7;
-        if (mod?.includes('right')) return 3;
-        if (mod === 'uturn') return 5;
-    }
+    if (type === 'turn') { if (mod?.includes('left')) return 7; if (mod?.includes('right')) return 3; if (mod === 'uturn') return 5; }
     if (type === 'merge') return 11;
     if (type === 'roundabout') return 9;
     return 1;
 }
 
 // ==========================================
-// TRAFFIC DATA (Stop Signs, Signals, Speed Limits)
+// TRAFFIC DATA with CACHING (Enhancement #7)
 // ==========================================
 
 async function fetchTrafficData(routeCoords) {
     if (!routeCoords || routeCoords.length < 2) return;
-    
+    const bounds = calculateBounds(routeCoords);
+    const cacheKey = `${bounds.south.toFixed(3)}_${bounds.west.toFixed(3)}_${bounds.north.toFixed(3)}_${bounds.east.toFixed(3)}`;
+
+    // Return cached data if available
+    if (state.overpassCache[cacheKey]) {
+        processTrafficData(state.overpassCache[cacheKey]);
+        return;
+    }
+
     try {
-        const bounds = calculateBounds(routeCoords);
         const padding = 0.005;
-        
-        const query = `
-            [out:json][timeout:25];
-            (
-                node["highway"="stop"](${bounds.south - padding},${bounds.west - padding},${bounds.north + padding},${bounds.east + padding});
-                node["highway"="traffic_signals"](${bounds.south - padding},${bounds.west - padding},${bounds.north + padding},${bounds.east + padding});
-                way["maxspeed"](${bounds.south - padding},${bounds.west - padding},${bounds.north + padding},${bounds.east + padding});
-            );
-            out body;
-            >;
-            out skel qt;
-        `;
-        
+        const query = `[out:json][timeout:25];(node["highway"="stop"](${bounds.south-padding},${bounds.west-padding},${bounds.north+padding},${bounds.east+padding});node["highway"="traffic_signals"](${bounds.south-padding},${bounds.west-padding},${bounds.north+padding},${bounds.east+padding});way["maxspeed"](${bounds.south-padding},${bounds.west-padding},${bounds.north+padding},${bounds.east+padding}););out body;>;out skel qt;`;
         const response = await fetch(CONFIG.OVERPASS_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: 'data=' + encodeURIComponent(query)
         });
-        
         if (!response.ok) return;
-        
         const data = await response.json();
+        state.overpassCache[cacheKey] = data;
         processTrafficData(data);
-        // Initial display will be called from GPS update
-        
-    } catch (err) {
-        console.warn('Traffic data fetch failed:', err);
-    }
+    } catch (err) { console.warn('Traffic data fetch failed:', err); }
 }
 
 function calculateBounds(coords) {
     let north = -90, south = 90, east = -180, west = 180;
-    coords.forEach(([lat, lon]) => {
-        if (lat > north) north = lat;
-        if (lat < south) south = lat;
-        if (lon > east) east = lon;
-        if (lon < west) west = lon;
-    });
+    coords.forEach(([lat, lon]) => { if (lat > north) north = lat; if (lat < south) south = lat; if (lon > east) east = lon; if (lon < west) west = lon; });
     return { north, south, east, west };
 }
 
 function processTrafficData(data) {
-    state.stopSigns = [];
-    state.trafficSignals = [];
-    state.speedLimitData = [];
-    
+    state.stopSigns = []; state.trafficSignals = []; state.speedLimitData = [];
     const nodes = {};
-    
     data.elements?.forEach(el => {
         if (el.type === 'node') {
             nodes[el.id] = { lat: el.lat, lon: el.lon };
-            
-            if (el.tags?.highway === 'stop') {
-                state.stopSigns.push({ lat: el.lat, lon: el.lon });
-            }
-            if (el.tags?.highway === 'traffic_signals') {
-                state.trafficSignals.push({ lat: el.lat, lon: el.lon });
-            }
+            if (el.tags?.highway === 'stop') state.stopSigns.push({ lat: el.lat, lon: el.lon });
+            if (el.tags?.highway === 'traffic_signals') state.trafficSignals.push({ lat: el.lat, lon: el.lon });
         }
     });
-    
     data.elements?.forEach(el => {
         if (el.type === 'way' && el.tags?.maxspeed && el.nodes) {
             const speed = parseSpeedLimit(el.tags.maxspeed);
-            if (speed) {
-                el.nodes.forEach(nodeId => {
-                    const node = nodes[nodeId];
-                    if (node) {
-                        state.speedLimitData.push({ ...node, speed });
-                    }
-                });
-            }
+            if (speed) el.nodes.forEach(nid => { const n = nodes[nid]; if (n) state.speedLimitData.push({ ...n, speed }); });
         }
     });
-    
-    console.log(`✓ Traffic: ${state.stopSigns.length} stops, ${state.trafficSignals.length} signals, ${state.speedLimitData.length} speed limit points`);
 }
 
 function parseSpeedLimit(maxspeed) {
     const num = parseInt(maxspeed);
     if (isNaN(num)) return null;
-    if (maxspeed.includes('km/h') || (!maxspeed.includes('mph') && num > 80)) {
-        return Math.round(num * 0.621371);
-    }
+    if (maxspeed.includes('km/h') || (!maxspeed.includes('mph') && num > 80)) return Math.round(num * 0.621371);
     return num;
 }
 
-// FIX #2: Only display traffic markers within 0.5 mile radius of user
 function displayTrafficMarkersNearUser(userLat, userLon) {
     if (!state.fullscreenMap) return;
-    
-    // Remove existing markers
     state.trafficMarkers.forEach(m => state.fullscreenMap.removeLayer(m));
     state.trafficMarkers = [];
-    
-    const radius = CONFIG.TRAFFIC_MARKER_RADIUS; // 0.5 miles in meters
-    
-    // Only show stop signs within radius
-    state.stopSigns.forEach(sign => {
-        const dist = getDistanceMeters(userLat, userLon, sign.lat, sign.lon);
-        if (dist <= radius) {
-            const marker = L.marker([sign.lat, sign.lon], {
-                icon: L.divIcon({
-                    className: 'traffic-marker',
-                    html: '<div class="stop-sign">STOP</div>',
-                    iconSize: [30, 30],
-                    iconAnchor: [15, 15]
-                }),
-                interactive: false
-            }).addTo(state.fullscreenMap);
-            state.trafficMarkers.push(marker);
+    const r = CONFIG.TRAFFIC_MARKER_RADIUS;
+    state.stopSigns.forEach(s => {
+        if (getDistanceMeters(userLat, userLon, s.lat, s.lon) <= r) {
+            state.trafficMarkers.push(L.marker([s.lat, s.lon], {
+                icon: L.divIcon({ className:'traffic-marker', html:'<div class="stop-sign">STOP</div>', iconSize:[30,30], iconAnchor:[15,15] }), interactive:false
+            }).addTo(state.fullscreenMap));
         }
     });
-    
-    // Only show traffic signals within radius
-    state.trafficSignals.forEach(signal => {
-        const dist = getDistanceMeters(userLat, userLon, signal.lat, signal.lon);
-        if (dist <= radius) {
-            const marker = L.marker([signal.lat, signal.lon], {
-                icon: L.divIcon({
-                    className: 'traffic-marker',
-                    html: '<div class="traffic-light">🚦</div>',
-                    iconSize: [24, 24],
-                    iconAnchor: [12, 12]
-                }),
-                interactive: false
-            }).addTo(state.fullscreenMap);
-            state.trafficMarkers.push(marker);
+    state.trafficSignals.forEach(s => {
+        if (getDistanceMeters(userLat, userLon, s.lat, s.lon) <= r) {
+            state.trafficMarkers.push(L.marker([s.lat, s.lon], {
+                icon: L.divIcon({ className:'traffic-marker', html:'<div class="traffic-light">🚦</div>', iconSize:[24,24], iconAnchor:[12,12] }), interactive:false
+            }).addTo(state.fullscreenMap));
         }
     });
 }
 
 function updateSpeedLimitBubble(userLat, userLon) {
-    if (!state.speedLimitData || state.speedLimitData.length === 0) {
-        document.getElementById('speed-limit-value').textContent = '--';
-        return;
-    }
-    
-    let closestSpeed = null;
-    let closestDist = Infinity;
-    
-    state.speedLimitData.forEach(point => {
-        const dist = getDistanceMeters(userLat, userLon, point.lat, point.lon);
-        if (dist < closestDist && dist < 100) {
-            closestDist = dist;
-            closestSpeed = point.speed;
-        }
+    let closestSpeed = null, closestDist = Infinity;
+    state.speedLimitData.forEach(p => {
+        const d = getDistanceMeters(userLat, userLon, p.lat, p.lon);
+        if (d < closestDist && d < 100) { closestDist = d; closestSpeed = p.speed; }
     });
-    
     if (closestSpeed !== state.currentSpeedLimit) {
         state.currentSpeedLimit = closestSpeed;
         document.getElementById('speed-limit-value').textContent = closestSpeed || '--';
@@ -827,48 +760,20 @@ function updateSpeedLimitBubble(userLat, userLon) {
 function addMarkers(start, end) {
     if (state.startMarker) state.map.removeLayer(state.startMarker);
     if (state.endMarker) state.map.removeLayer(state.endMarker);
-    
-    const greenIcon = L.icon({
-        iconUrl: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="25" height="41"%3E%3Cpath fill="%2334A853" d="M12.5 0C5.6 0 0 5.6 0 12.5c0 8.4 12.5 28.5 12.5 28.5S25 20.9 25 12.5C25 5.6 19.4 0 12.5 0z"/%3E%3Ccircle fill="white" cx="12.5" cy="12.5" r="5"/%3E%3C/svg%3E',
-        iconSize: [25, 41], iconAnchor: [12, 41]
-    });
-    
-    const redIcon = L.icon({
-        iconUrl: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="25" height="41"%3E%3Cpath fill="%23EA4335" d="M12.5 0C5.6 0 0 5.6 0 12.5c0 8.4 12.5 28.5 12.5 28.5S25 20.9 25 12.5C25 5.6 19.4 0 12.5 0z"/%3E%3Ccircle fill="white" cx="12.5" cy="12.5" r="5"/%3E%3C/svg%3E',
-        iconSize: [25, 41], iconAnchor: [12, 41]
-    });
-    
-    state.startMarker = L.marker([start.lat, start.lon], { icon: greenIcon }).addTo(state.map);
-    state.endMarker = L.marker([end.lat, end.lon], { icon: redIcon }).addTo(state.map);
+    const gIcon = L.icon({ iconUrl:'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="25" height="41"%3E%3Cpath fill="%2334A853" d="M12.5 0C5.6 0 0 5.6 0 12.5c0 8.4 12.5 28.5 12.5 28.5S25 20.9 25 12.5C25 5.6 19.4 0 12.5 0z"/%3E%3Ccircle fill="white" cx="12.5" cy="12.5" r="5"/%3E%3C/svg%3E', iconSize:[25,41], iconAnchor:[12,41] });
+    const rIcon = L.icon({ iconUrl:'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="25" height="41"%3E%3Cpath fill="%23EA4335" d="M12.5 0C5.6 0 0 5.6 0 12.5c0 8.4 12.5 28.5 12.5 28.5S25 20.9 25 12.5C25 5.6 19.4 0 12.5 0z"/%3E%3Ccircle fill="white" cx="12.5" cy="12.5" r="5"/%3E%3C/svg%3E', iconSize:[25,41], iconAnchor:[12,41] });
+    state.startMarker = L.marker([start.lat, start.lon], { icon: gIcon }).addTo(state.map);
+    state.endMarker = L.marker([end.lat, end.lon], { icon: rIcon }).addTo(state.map);
 }
 
 function drawRoutes(shortest, fastest) {
     if (state.shortestRouteLayer) state.map.removeLayer(state.shortestRouteLayer);
     if (state.fastestRouteLayer) state.map.removeLayer(state.fastestRouteLayer);
-    
-    // Always draw fastest route first (underneath) - BRIGHT RED, THICK
-    state.fastestRouteLayer = L.polyline(fastest.geometry, {
-        color: '#dc2626',
-        weight: 7,
-        opacity: 0.9,
-        dashArray: '12, 8'
-    }).addTo(state.map);
-    
-    // Draw shortest route on top - SOLID BLUE
-    state.shortestRouteLayer = L.polyline(shortest.geometry, {
-        color: '#2563eb',
-        weight: 6,
-        opacity: 1
-    }).addTo(state.map);
-    
+    state.fastestRouteLayer = L.polyline(fastest.geometry, { color:'#dc2626', weight:7, opacity:0.9, dashArray:'12, 8' }).addTo(state.map);
+    state.shortestRouteLayer = L.polyline(shortest.geometry, { color:'#2563eb', weight:6, opacity:1 }).addTo(state.map);
     document.getElementById('map-legend').classList.remove('hidden');
     document.getElementById('recenter-btn').classList.remove('hidden');
-    
-    const allCoords = [...shortest.geometry, ...fastest.geometry];
-    state.map.fitBounds(L.latLngBounds(allCoords), { padding: [50, 50], maxZoom: 14 });
-    
-    console.log(`📍 Shortest route source: ${shortest.source || 'unknown'}`);
-    console.log(`📍 Fastest route source: ${fastest.source || 'unknown'}`);
+    state.map.fitBounds(L.latLngBounds([...shortest.geometry, ...fastest.geometry]), { padding:[50,50], maxZoom:14 });
 }
 
 // ==========================================
@@ -879,17 +784,13 @@ function displayResults(comparison) {
     const { shortestRoute, fastestRoute, milesSaved, extraTime } = comparison;
     const timeTolerance = parseFloat(document.getElementById('time-tolerance').value);
     const minSavings = parseFloat(document.getElementById('min-savings').value);
-    
     document.getElementById('results-section').classList.remove('hidden');
     document.getElementById('shortest-distance').textContent = `${shortestRoute.distance.toFixed(2)} mi`;
     document.getElementById('shortest-duration').textContent = `~${Math.round(shortestRoute.duration)} min`;
     document.getElementById('fastest-distance').textContent = `${fastestRoute.distance.toFixed(2)} mi`;
     document.getElementById('fastest-duration').textContent = `~${Math.round(fastestRoute.duration)} min`;
-    
     document.getElementById('routes-analyzed').textContent = `Analyzed ${state.routesAnalyzed} routes`;
-    
     const card = document.getElementById('recommendation-card');
-    
     if (milesSaved >= minSavings && milesSaved > 0.1) {
         if (Math.abs(extraTime) <= timeTolerance) {
             card.className = 'recommendation-card success';
@@ -902,22 +803,18 @@ function displayResults(comparison) {
         card.className = 'recommendation-card info';
         card.innerHTML = `<div class="title">ℹ️ Routes Are Similar</div><div class="subtitle">Difference: ${Math.abs(milesSaved).toFixed(2)} mi</div>`;
     }
-    
     updateSavingsDisplay();
 }
 
 function updateSavingsDisplay() {
     if (!state.routeComparison) return;
-    
     const tripsPerMonth = parseFloat(document.getElementById('trips-per-month').value);
     const costPerMile = parseFloat(document.getElementById('cost-per-mile').value);
-    const milesSaved = Math.max(0, state.routeComparison.milesSaved);
-    
-    const monthlyMiles = milesSaved * tripsPerMonth;
-    const monthlySavings = monthlyMiles * costPerMile;
-    
-    document.getElementById('miles-saved').textContent = `${milesSaved.toFixed(2)} mi`;
-    document.getElementById('monthly-miles').textContent = `${monthlyMiles.toFixed(1)} mi`;
+    const ms = Math.max(0, state.routeComparison.milesSaved);
+    const mm = ms * tripsPerMonth;
+    const monthlySavings = mm * costPerMile;
+    document.getElementById('miles-saved').textContent = `${ms.toFixed(2)} mi`;
+    document.getElementById('monthly-miles').textContent = `${mm.toFixed(1)} mi`;
     document.getElementById('monthly-savings').textContent = `$${monthlySavings.toFixed(2)}`;
     document.getElementById('annual-savings').textContent = `$${(monthlySavings * 12).toFixed(2)}`;
 }
@@ -929,13 +826,8 @@ function updateSavingsDisplay() {
 function showDirections(routeType) {
     const routeData = routeType === 'shortest' ? state.shortestRouteData : state.fastestRouteData;
     if (!routeData?.steps) return;
-    
     const panel = document.getElementById('directions-panel');
-    const title = document.getElementById('directions-title');
-    const content = document.getElementById('directions-content');
-    
-    title.textContent = routeType === 'shortest' ? '📍 Shortest Route' : '📍 Fastest Route';
-    
+    document.getElementById('directions-title').textContent = routeType === 'shortest' ? '🔵 Shortest Route' : '🔴 Fastest Route';
     let html = '<ol class="directions-list">';
     routeData.steps.forEach(step => {
         const icon = getDirectionIcon(step.type);
@@ -943,32 +835,21 @@ function showDirections(routeType) {
         html += `<li class="direction-step"><span class="step-icon">${icon}</span><div class="step-content"><span class="step-instruction">${step.instruction}</span>${dist ? `<span class="step-distance">${dist}</span>` : ''}</div></li>`;
     });
     html += '</ol>';
-    html += `<div class="directions-summary"><strong>Total:</strong> ${routeData.distance.toFixed(2)} mi • ~${Math.round(routeData.duration)} min</div>`;
-    
-    content.innerHTML = html;
+    html += `<div class="directions-summary"><strong>Total:</strong> ${routeData.distance.toFixed(2)} mi · ~${Math.round(routeData.duration)} min</div>`;
+    document.getElementById('directions-content').innerHTML = html;
     panel.classList.remove('hidden');
     highlightRoute(routeType);
 }
 
 function closeDirections() {
     document.getElementById('directions-panel').classList.add('hidden');
-    if (state.shortestRouteLayer) state.shortestRouteLayer.setStyle({ opacity: 1, weight: 6 });
-    if (state.fastestRouteLayer) state.fastestRouteLayer.setStyle({ opacity: 0.9, weight: 7 });
+    if (state.shortestRouteLayer) state.shortestRouteLayer.setStyle({ opacity:1, weight:6 });
+    if (state.fastestRouteLayer) state.fastestRouteLayer.setStyle({ opacity:0.9, weight:7 });
 }
 
 function highlightRoute(routeType) {
-    if (state.shortestRouteLayer) {
-        state.shortestRouteLayer.setStyle({ 
-            opacity: routeType === 'shortest' ? 1 : 0.4, 
-            weight: routeType === 'shortest' ? 8 : 4 
-        });
-    }
-    if (state.fastestRouteLayer) {
-        state.fastestRouteLayer.setStyle({ 
-            opacity: routeType === 'fastest' ? 1 : 0.4, 
-            weight: routeType === 'fastest' ? 9 : 5 
-        });
-    }
+    if (state.shortestRouteLayer) state.shortestRouteLayer.setStyle({ opacity: routeType==='shortest'?1:0.4, weight: routeType==='shortest'?8:4 });
+    if (state.fastestRouteLayer) state.fastestRouteLayer.setStyle({ opacity: routeType==='fastest'?1:0.4, weight: routeType==='fastest'?9:5 });
 }
 
 function formatDistance(meters) {
@@ -979,7 +860,7 @@ function formatDistance(meters) {
 }
 
 function getDirectionIcon(type) {
-    const icons = { 0: '📍', 1: '⬆️', 2: '↗️', 3: '➡️', 4: '↘️', 5: '↩️', 6: '↙️', 7: '⬅️', 8: '↖️', 9: '🔄', 10: '🏁', 11: '🛣️', 12: '🚗', 13: '🔀' };
+    const icons = { 0:'🔵',1:'⬆️',2:'↗️',3:'➡️',4:'↘️',5:'↩️',6:'↙️',7:'⬅️',8:'↖️',9:'🔄',10:'🏁',11:'🛣️',12:'🚗',13:'🔀' };
     return icons[type] || '⬆️';
 }
 
@@ -992,47 +873,81 @@ async function fetchBothElevations(start, end) {
         const url = `${CONFIG.ELEVATION_URL}?locations=${start.lat},${start.lon}|${end.lat},${end.lon}`;
         const res = await fetch(url);
         const data = await res.json();
-        
-        if (data.results?.length === 2) {
-            displayElevation(data.results[0].elevation, data.results[1].elevation);
-        }
-    } catch (err) {
-        document.getElementById('elevation-card').classList.add('hidden');
-    }
+        if (data.results?.length === 2) displayElevation(data.results[0].elevation, data.results[1].elevation);
+    } catch { document.getElementById('elevation-card').classList.add('hidden'); }
 }
 
 function displayElevation(startElev, endElev) {
     const card = document.getElementById('elevation-card');
-    if (startElev == null || endElev == null) {
-        card.classList.add('hidden');
-        return;
-    }
-    
-    const startFeet = Math.round(startElev * 3.28084);
-    const endFeet = Math.round(endElev * 3.28084);
-    const diffFeet = endFeet - startFeet;
-    
-    document.getElementById('start-elevation').textContent = `${startFeet.toLocaleString()} ft`;
-    document.getElementById('end-elevation').textContent = `${endFeet.toLocaleString()} ft`;
-    
+    if (startElev == null || endElev == null) { card.classList.add('hidden'); return; }
+    const sf = Math.round(startElev * 3.28084);
+    const ef = Math.round(endElev * 3.28084);
+    const diff = ef - sf;
+    document.getElementById('start-elevation').textContent = `${sf.toLocaleString()} ft`;
+    document.getElementById('end-elevation').textContent = `${ef.toLocaleString()} ft`;
     const diffEl = document.getElementById('elevation-diff');
     const labelEl = document.getElementById('elevation-label');
-    
-    if (diffFeet > 0) {
-        labelEl.textContent = '📈 Gain:';
-        diffEl.textContent = `+${diffFeet.toLocaleString()} ft`;
-        diffEl.className = 'elevation-value uphill';
-    } else if (diffFeet < 0) {
-        labelEl.textContent = '📉 Drop:';
-        diffEl.textContent = `${diffFeet.toLocaleString()} ft`;
-        diffEl.className = 'elevation-value downhill';
-    } else {
-        labelEl.textContent = 'Change:';
-        diffEl.textContent = '0 ft';
-        diffEl.className = 'elevation-value';
-    }
-    
+    if (diff > 0) { labelEl.textContent = '📈 Gain:'; diffEl.textContent = `+${diff.toLocaleString()} ft`; diffEl.className = 'elevation-value uphill'; }
+    else if (diff < 0) { labelEl.textContent = '📉 Drop:'; diffEl.textContent = `${diff.toLocaleString()} ft`; diffEl.className = 'elevation-value downhill'; }
+    else { labelEl.textContent = 'Change:'; diffEl.textContent = '0 ft'; diffEl.className = 'elevation-value'; }
     card.classList.remove('hidden');
+}
+
+// ==========================================
+// GEOMETRY HELPERS
+// ==========================================
+
+function computeGeometryDistance(geometry) {
+    let total = 0;
+    for (let i = 0; i < geometry.length - 1; i++) {
+        const [lat1, lon1] = geometry[i];
+        const [lat2, lon2] = geometry[i + 1];
+        total += getDistanceMeters(lat1, lon1, lat2, lon2);
+    }
+    return total;
+}
+
+function getDistanceMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// Enhancement #3: Project point onto nearest line SEGMENT, not just vertex
+function snapToRoute(lat, lon) {
+    if (!state.activeRouteCoords || state.activeRouteCoords.length < 2) return { lat, lon, index: 0 };
+    let minDist = Infinity;
+    let bestPoint = { lat, lon };
+    let bestIndex = 0;
+
+    for (let i = 0; i < state.activeRouteCoords.length - 1; i++) {
+        const [aLat, aLon] = state.activeRouteCoords[i];
+        const [bLat, bLon] = state.activeRouteCoords[i + 1];
+        const proj = projectOntoSegment(lat, lon, aLat, aLon, bLat, bLon);
+        const d = getDistanceMeters(lat, lon, proj.lat, proj.lon);
+        if (d < minDist) { minDist = d; bestPoint = proj; bestIndex = i; }
+    }
+    if (minDist <= CONFIG.ROUTE_SNAP_THRESHOLD) return { ...bestPoint, index: bestIndex };
+    return { lat, lon, index: bestIndex };
+}
+
+function projectOntoSegment(pLat, pLon, aLat, aLon, bLat, bLon) {
+    const dx = bLon - aLon, dy = bLat - aLat;
+    if (dx === 0 && dy === 0) return { lat: aLat, lon: aLon };
+    let t = ((pLon - aLon) * dx + (pLat - aLat) * dy) / (dx * dx + dy * dy);
+    t = Math.max(0, Math.min(1, t));
+    return { lat: aLat + t * dy, lon: aLon + t * dx };
+}
+
+// Bearing from point A to point B in degrees
+function getBearing(lat1, lon1, lat2, lon2) {
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const y = Math.sin(dLon) * Math.cos(lat2 * Math.PI / 180);
+    const x = Math.cos(lat1 * Math.PI / 180) * Math.sin(lat2 * Math.PI / 180) -
+              Math.sin(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.cos(dLon);
+    return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
 }
 
 // ==========================================
@@ -1041,101 +956,104 @@ function displayElevation(startElev, endElev) {
 
 async function startFullscreenNavigation() {
     const routeData = state.selectedRoute === 'shortest' ? state.shortestRouteData : state.fastestRouteData;
-    if (!routeData) {
-        showError('Find a route first');
-        return;
-    }
-    
+    if (!routeData) { showError('Find a route first'); return; }
+
     state.isNavigating = true;
     state.isFollowMode = true;
     state.hasArrived = false;
     state.currentStepIndex = 0;
+    state.minProgressIndex = 0;
     state.activeRouteCoords = routeData.geometry;
     state.activeRouteSteps = routeData.steps;
     state.currentRoadName = '';
-    
-    // Calculate cumulative distances for each step
+    state.activeRouteDuration = routeData.duration;
+    state.activeRouteTotalDistance = computeGeometryDistance(routeData.geometry);
+    state.lastVoiceStepIndex = -1;
+    state.lastVoiceStage = '';
+    state.wrongWayCount = 0;
+    state.navStartTime = Date.now();
+
     state.stepCumulativeDistance = [];
     let cumDist = 0;
-    routeData.steps.forEach(step => {
-        state.stepCumulativeDistance.push(cumDist);
-        cumDist += step.distance || 0;
-    });
-    
+    routeData.steps.forEach(step => { state.stepCumulativeDistance.push(cumDist); cumDist += step.distance || 0; });
+
     await requestWakeLock();
-    
     document.getElementById('fullscreen-nav').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
-    
+
     if (!state.fullscreenMap) {
-        state.fullscreenMap = L.map('fullscreen-map', {
-            zoomControl: false,
-            attributionControl: false
-        }).setView([state.startCoords.lat, state.startCoords.lon], 17);
-        
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(state.fullscreenMap);
-        
+        state.fullscreenMap = L.map('fullscreen-map', { zoomControl: false, attributionControl: false })
+            .setView([state.startCoords.lat, state.startCoords.lon], 17);
+        state.fullscreenTileLayer = L.tileLayer(getCurrentTileUrl(), { maxZoom: 19 }).addTo(state.fullscreenMap);
+
         state.fullscreenMap.on('dragstart', () => {
             state.isPanning = true;
             state.isFollowMode = false;
-            document.getElementById('toggle-north-btn').classList.remove('active');
+            const wrapper = document.getElementById('map-rotation-wrapper');
+            if (wrapper) wrapper.style.transform = 'translate(-50%, -50%) rotate(0deg)';
+            const btn = document.getElementById('toggle-north-btn');
+            btn.classList.remove('active'); btn.innerHTML = '🔺';
+            const compass = document.getElementById('compass-indicator');
+            if (compass) compass.style.transform = 'rotate(0deg)';
+            rotateCarIcon(state.lastValidHeading);
         });
-        
-        state.fullscreenMap.on('dragend', () => {
-            state.isPanning = false;
-        });
+        state.fullscreenMap.on('dragend', () => { state.isPanning = false; });
+    } else {
+        // Refresh tile layer for night mode changes
+        if (state.fullscreenTileLayer) state.fullscreenTileLayer.setUrl(getCurrentTileUrl());
     }
-    
+
+    // Clean up old layers
     if (state.fullscreenRouteLayer) state.fullscreenMap.removeLayer(state.fullscreenRouteLayer);
+    if (state.fullscreenCompletedLayer) state.fullscreenMap.removeLayer(state.fullscreenCompletedLayer);
     state.trafficMarkers.forEach(m => state.fullscreenMap.removeLayer(m));
     state.trafficMarkers = [];
-    
-    state.fullscreenRouteLayer = L.polyline(routeData.geometry, {
-        color: '#2563eb',
-        weight: 8,
-        opacity: 0.9
+    if (state.destinationMarker) state.fullscreenMap.removeLayer(state.destinationMarker);
+
+    // Draw route (all blue initially)
+    state.fullscreenRouteLayer = L.polyline(routeData.geometry, { color:'#2563eb', weight:8, opacity:0.9 }).addTo(state.fullscreenMap);
+    state.fullscreenCompletedLayer = L.polyline([], { color:'#9ca3af', weight:6, opacity:0.5 }).addTo(state.fullscreenMap);
+
+    state.destinationMarker = L.marker([state.endCoords.lat, state.endCoords.lon], {
+        icon: L.divIcon({ className:'destination-marker', html:'<div class="dest-icon">🏁</div>', iconSize:[40,40], iconAnchor:[20,20] })
     }).addTo(state.fullscreenMap);
-    
-    L.marker([state.endCoords.lat, state.endCoords.lon], {
-        icon: L.divIcon({
-            className: 'destination-marker',
-            html: '<div class="dest-icon">🏁</div>',
-            iconSize: [40, 40],
-            iconAnchor: [20, 20]
-        })
-    }).addTo(state.fullscreenMap);
-    
+
     document.getElementById('nav-distance-remaining').textContent = `${routeData.distance.toFixed(1)} mi`;
     document.getElementById('nav-time-remaining').textContent = `${Math.round(routeData.duration)} min`;
-    
-    if (routeData.steps?.[0]) {
-        updateNavDirection(routeData.steps[0], routeData.steps[0].distance);
-    }
-    
+    if (routeData.steps?.[0]) updateNavDirection(routeData.steps[0], routeData.steps[0].distance);
+
     fetchTrafficData(routeData.geometry);
     startNavigationGPS();
-    
-    state.fullscreenMap.fitBounds(L.latLngBounds(routeData.geometry), { padding: [50, 50] });
-    
+    state.fullscreenMap.fitBounds(L.latLngBounds(routeData.geometry), { padding:[50,50] });
     document.getElementById('toggle-north-btn').classList.add('active');
+
+    // Announce start
+    speak(`Navigation started. ${routeData.distance.toFixed(1)} miles, about ${Math.round(routeData.duration)} minutes.`);
 }
 
 async function exitFullscreenNavigation() {
+    // Log trip before exit
+    if (state.isNavigating && state.navStartTime) {
+        const routeData = state.selectedRoute === 'shortest' ? state.shortestRouteData : state.fastestRouteData;
+        const milesSaved = state.routeComparison?.milesSaved || 0;
+        if (routeData) logTrip(routeData, milesSaved);
+    }
+
     state.isNavigating = false;
     state.hasArrived = false;
-    
+    window.speechSynthesis?.cancel();
+
+    if (state.destinationMarker && state.fullscreenMap) { state.fullscreenMap.removeLayer(state.destinationMarker); state.destinationMarker = null; }
+    if (state.fullscreenCompletedLayer && state.fullscreenMap) { state.fullscreenMap.removeLayer(state.fullscreenCompletedLayer); state.fullscreenCompletedLayer = null; }
+
     await releaseWakeLock();
-    
-    if (state.gpsWatchId) {
-        navigator.geolocation.clearWatch(state.gpsWatchId);
-        state.gpsWatchId = null;
-    }
-    
+    if (state.gpsWatchId) { navigator.geolocation.clearWatch(state.gpsWatchId); state.gpsWatchId = null; }
+
     document.getElementById('fullscreen-nav').classList.add('hidden');
     document.body.style.overflow = '';
     document.getElementById('off-route-warning').classList.add('hidden');
+    document.getElementById('wrong-way-warning').classList.add('hidden');
     document.getElementById('arrived-toast').classList.add('hidden');
-    
     const wrapper = document.getElementById('map-rotation-wrapper');
     if (wrapper) wrapper.style.transform = 'translate(-50%, -50%) rotate(0deg)';
 }
@@ -1146,85 +1064,81 @@ async function exitFullscreenNavigation() {
 
 async function requestWakeLock() {
     if (!('wakeLock' in navigator)) return;
-    
     try {
         state.wakeLock = await navigator.wakeLock.request('screen');
-        console.log('✓ Screen wake lock active');
-        
-        document.addEventListener('visibilitychange', async () => {
-            if (state.isNavigating && document.visibilityState === 'visible' && !state.wakeLock) {
-                state.wakeLock = await navigator.wakeLock.request('screen');
-            }
-        });
-    } catch (err) {
-        console.warn('Wake lock failed:', err);
-    }
+        if (!state._wakeLockListenerAdded) {
+            state._wakeLockListenerAdded = true;
+            document.addEventListener('visibilitychange', async () => {
+                if (state.isNavigating && document.visibilityState === 'visible' && !state.wakeLock) {
+                    try { state.wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+                }
+            });
+        }
+    } catch {}
 }
 
 async function releaseWakeLock() {
-    if (state.wakeLock) {
-        await state.wakeLock.release().catch(() => {});
-        state.wakeLock = null;
-    }
+    if (state.wakeLock) { await state.wakeLock.release().catch(()=>{}); state.wakeLock = null; }
 }
 
 // ==========================================
-// GPS TRACKING
+// GPS TRACKING with ADAPTIVE INTERVALS (#10)
 // ==========================================
 
 function startNavigationGPS() {
     if (state.gpsWatchId) navigator.geolocation.clearWatch(state.gpsWatchId);
-    
+
     state.gpsWatchId = navigator.geolocation.watchPosition(
         (pos) => {
             const { latitude: lat, longitude: lon, accuracy, speed, heading } = pos.coords;
             state.currentUserLocation = { lat, lon };
             state.currentSpeed = speed ? Math.round(speed * 2.23694) : 0;
-            
             document.getElementById('current-speed').textContent = `${state.currentSpeed} mph`;
-            
+
+            const isAccurate = accuracy <= 60;
+
             updateSpeedLimitBubble(lat, lon);
-            
-            // FIX #2: Update traffic markers based on user position
             displayTrafficMarkersNearUser(lat, lon);
-            
-            // FIX #4: Track heading for car icon rotation
-            if (heading != null && !isNaN(heading) && speed > 0.5) {
+
+            // Heading update (only at driving speed > ~4.5 mph)
+            if (heading != null && !isNaN(heading) && speed > 2.0) {
                 state.currentHeading = heading;
-                state.lastValidHeading = heading; // Store last valid heading
-                if (state.isFollowMode && !state.isPanning) {
-                    rotateMapToHeading(heading);
-                }
+                state.lastValidHeading = heading;
+                if (state.isFollowMode && !state.isPanning) rotateMapToHeading(heading);
             }
-            
-            // FIX #5: Snap position to route if close enough
-            const snappedPosition = snapToRoute(lat, lon);
-            
-            updateFullscreenUserMarker(snappedPosition.lat, snappedPosition.lon, accuracy);
-            
-            // Rotate car icon based on heading (FIX #4)
+
+            const snapped = snapToRoute(lat, lon);
+            updateFullscreenUserMarker(snapped.lat, snapped.lon, accuracy);
             rotateCarIcon(state.lastValidHeading);
-            
+
             if (state.isFollowMode && !state.isPanning && state.fullscreenMap) {
-                state.fullscreenMap.setView([snappedPosition.lat, snappedPosition.lon], state.fullscreenMap.getZoom(), { animate: true, duration: 0.5 });
+                state.fullscreenMap.setView([snapped.lat, snapped.lon], state.fullscreenMap.getZoom(), { animate:true, duration:0.5 });
             }
-            
+
+            // Arrival check
             const distToEnd = getDistanceMeters(lat, lon, state.endCoords.lat, state.endCoords.lon);
             if (distToEnd < CONFIG.DESTINATION_THRESHOLD && !state.hasArrived) {
                 state.hasArrived = true;
                 showArrivedMessage();
                 return;
             }
-            
-            updateNavigationProgress(lat, lon);
-            
-            if (!state.hasArrived && isOffRoute(lat, lon)) {
-                document.getElementById('off-route-warning').classList.remove('hidden');
-                performReroute();
-            } else {
-                document.getElementById('off-route-warning').classList.add('hidden');
+
+            if (isAccurate) {
+                updateNavigationProgress(lat, lon, speed);
+
+                // Wrong-way detection (Enhancement #5)
+                if (speed > CONFIG.WRONG_WAY_SPEED && heading != null && !isNaN(heading) && state.activeRouteCoords.length > 1) {
+                    checkWrongWay(lat, lon, heading, snapped.index);
+                }
+
+                if (!state.hasArrived && isOffRoute(lat, lon)) {
+                    document.getElementById('off-route-warning').classList.remove('hidden');
+                    performReroute();
+                } else {
+                    document.getElementById('off-route-warning').classList.add('hidden');
+                }
             }
-            
+
             updateMainMapUserMarker(lat, lon, accuracy);
         },
         (err) => console.warn('GPS error:', err),
@@ -1232,48 +1146,63 @@ function startNavigationGPS() {
     );
 }
 
-// FIX #5: Snap user position to nearest point on route
-function snapToRoute(lat, lon) {
-    if (!state.activeRouteCoords || state.activeRouteCoords.length < 2) {
-        return { lat, lon };
-    }
-    
-    let minDist = Infinity;
-    let closestPoint = { lat, lon };
-    
-    for (let i = 0; i < state.activeRouteCoords.length; i++) {
-        const [rLat, rLon] = state.activeRouteCoords[i];
-        const dist = getDistanceMeters(lat, lon, rLat, rLon);
-        if (dist < minDist) {
-            minDist = dist;
-            closestPoint = { lat: rLat, lon: rLon };
+// Enhancement #5: Wrong-way detection
+function checkWrongWay(lat, lon, heading, routeIndex) {
+    const idx = Math.min(routeIndex, state.activeRouteCoords.length - 2);
+    const [aLat, aLon] = state.activeRouteCoords[idx];
+    const [bLat, bLon] = state.activeRouteCoords[idx + 1];
+    const routeBearing = getBearing(aLat, aLon, bLat, bLon);
+    let angleDiff = Math.abs(heading - routeBearing);
+    if (angleDiff > 180) angleDiff = 360 - angleDiff;
+
+    const warnEl = document.getElementById('wrong-way-warning');
+    if (angleDiff > CONFIG.WRONG_WAY_ANGLE) {
+        state.wrongWayCount++;
+        if (state.wrongWayCount >= 3) {
+            warnEl.classList.remove('hidden');
+            speak('Wrong way. Please turn around.');
         }
+    } else {
+        state.wrongWayCount = 0;
+        warnEl.classList.add('hidden');
     }
-    
-    // Only snap if within threshold
-    if (minDist <= CONFIG.ROUTE_SNAP_THRESHOLD) {
-        return closestPoint;
-    }
-    
-    return { lat, lon };
 }
 
-// FIX #1 & #3: Improved navigation progress with smarter instructions and better time
-function updateNavigationProgress(userLat, userLon) {
+// Enhancement #3: Improved snap-to-route already integrated above
+
+// Enhancement #2: Route progress visualization
+function updateRouteVisualization(closestPointIndex) {
+    if (!state.fullscreenCompletedLayer || !state.fullscreenRouteLayer) return;
+    const completed = state.activeRouteCoords.slice(0, closestPointIndex + 1);
+    const remaining = state.activeRouteCoords.slice(closestPointIndex);
+    state.fullscreenCompletedLayer.setLatLngs(completed);
+    state.fullscreenRouteLayer.setLatLngs(remaining);
+}
+
+// Enhancement #6: Monotonic step advancement + improved progress
+function updateNavigationProgress(userLat, userLon, speed) {
     if (!state.activeRouteSteps || state.activeRouteSteps.length === 0) return;
-    
+
     let minDistToRoute = Infinity;
     let closestPointIndex = 0;
-    
-    for (let i = 0; i < state.activeRouteCoords.length; i++) {
+    // Enhancement #6: Only search forward from last known position (monotonic)
+    const searchStart = Math.max(0, state.minProgressIndex - 5);
+    for (let i = searchStart; i < state.activeRouteCoords.length; i++) {
         const [rLat, rLon] = state.activeRouteCoords[i];
         const dist = getDistanceMeters(userLat, userLon, rLat, rLon);
-        if (dist < minDistToRoute) {
-            minDistToRoute = dist;
-            closestPointIndex = i;
-        }
+        if (dist < minDistToRoute) { minDistToRoute = dist; closestPointIndex = i; }
     }
-    
+
+    // Monotonic: only advance forward (with small buffer for GPS jitter)
+    if (closestPointIndex >= state.minProgressIndex) {
+        state.minProgressIndex = closestPointIndex;
+    } else {
+        closestPointIndex = state.minProgressIndex;
+    }
+
+    // Enhancement #2: Update visual progress
+    updateRouteVisualization(closestPointIndex);
+
     // Calculate distance traveled along route
     let distanceTraveled = 0;
     for (let i = 0; i < closestPointIndex && i < state.activeRouteCoords.length - 1; i++) {
@@ -1281,88 +1210,75 @@ function updateNavigationProgress(userLat, userLon) {
         const [lat2, lon2] = state.activeRouteCoords[i + 1];
         distanceTraveled += getDistanceMeters(lat1, lon1, lat2, lon2);
     }
-    
-    // Find current step based on distance traveled
+
+    // Find current step
     let currentStep = 0;
     for (let i = 0; i < state.stepCumulativeDistance.length - 1; i++) {
-        if (distanceTraveled >= state.stepCumulativeDistance[i]) {
-            currentStep = i;
-        }
+        if (distanceTraveled >= state.stepCumulativeDistance[i]) currentStep = i;
     }
-    
     state.currentStepIndex = currentStep;
-    
-    // Calculate distance to next turn
+
     const nextStepStart = state.stepCumulativeDistance[currentStep + 1] || state.stepCumulativeDistance[currentStep];
     const distanceToNextTurn = Math.max(0, nextStepStart - distanceTraveled);
-    
+
     const step = state.activeRouteSteps[currentStep];
     const nextStep = state.activeRouteSteps[currentStep + 1];
-    
-    // FIX #1: Smart instruction - check if we need to show "Continue on..." or upcoming turn
+
     if (step) {
         const roadName = extractRoadName(step.instruction);
-        
-        // If we're well into this step (more than 100m past the turn), show "Continue on..."
         const distanceIntoStep = distanceTraveled - state.stepCumulativeDistance[currentStep];
-        
+
+        let displayInstruction, displayType, displayDistance;
         if (distanceIntoStep > 100 && distanceToNextTurn > 200 && roadName) {
-            // We're on this road, show continue instruction
-            const continueInstruction = `Continue on ${roadName}`;
-            updateNavDirectionSmart(continueInstruction, distanceToNextTurn, 1); // type 1 = straight
+            displayInstruction = `Continue on ${roadName}`;
+            displayType = 1;
+            displayDistance = distanceToNextTurn;
         } else if (nextStep && distanceToNextTurn < 200) {
-            // Approaching next turn, show that instruction
-            updateNavDirectionSmart(nextStep.instruction, distanceToNextTurn, nextStep.type);
+            displayInstruction = nextStep.instruction;
+            displayType = nextStep.type;
+            displayDistance = distanceToNextTurn;
         } else {
-            // Show current step instruction
-            updateNavDirectionSmart(step.instruction, distanceToNextTurn, step.type);
+            displayInstruction = step.instruction;
+            displayType = step.type;
+            displayDistance = distanceToNextTurn;
+        }
+
+        updateNavDirectionSmart(displayInstruction, displayDistance, displayType);
+
+        // Enhancement #1: Voice prompt for upcoming turns
+        if (nextStep && distanceToNextTurn <= CONFIG.VOICE_FAR) {
+            speakDirection(nextStep.instruction, distanceToNextTurn);
         }
     }
-    
-    // FIX #3: Better time calculation using route average speed
-    const routeData = state.selectedRoute === 'shortest' ? state.shortestRouteData : state.fastestRouteData;
-    const totalRouteDistance = routeData?.distance * 1609.34 || 0;
+
+    // Distance / time remaining
+    const totalRouteDistance = state.activeRouteTotalDistance;
     const remainingDistance = Math.max(0, totalRouteDistance - distanceTraveled);
-    
-    // Use route's original time estimate proportionally, or calculate from avg speed
     let remainingTime;
-    if (routeData && totalRouteDistance > 0) {
-        // Proportional time based on remaining distance
-        const proportionRemaining = remainingDistance / totalRouteDistance;
-        remainingTime = routeData.duration * proportionRemaining;
+    if (state.activeRouteDuration > 0 && totalRouteDistance > 0) {
+        remainingTime = state.activeRouteDuration * (remainingDistance / totalRouteDistance);
     } else {
-        // Fallback: use route average speed (more stable than current speed)
-        const avgSpeedMps = state.routeAvgSpeed * 0.44704; // Convert mph to m/s
+        const avgSpeedMps = state.routeAvgSpeed * 0.44704;
         remainingTime = remainingDistance / avgSpeedMps / 60;
     }
-    
-    document.getElementById('nav-distance-remaining').textContent = `${(remainingDistance / 1609.34).toFixed(1)} mi`;
-    document.getElementById('nav-time-remaining').textContent = `${Math.max(1, Math.round(remainingTime))} min`;
+
+    const eta = new Date(Date.now() + remainingTime * 60000);
+    const etaStr = eta.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' });
+
+    // Update ARIA live region (#11)
+    const distText = `${(remainingDistance / 1609.34).toFixed(1)} mi`;
+    const timeText = `${Math.max(1, Math.round(remainingTime))} min`;
+    document.getElementById('nav-distance-remaining').textContent = distText;
+    document.getElementById('nav-time-remaining').textContent = `${timeText} · ${etaStr}`;
 }
 
-// FIX #1: Extract road name from instruction
 function extractRoadName(instruction) {
     if (!instruction) return null;
-    
-    // Common patterns: "Turn right onto Main Street", "Continue on 244th Avenue Northeast"
-    const patterns = [
-        /onto (.+)$/i,
-        /on (.+)$/i,
-        /toward (.+)$/i,
-        /Head .+ on (.+)$/i
-    ];
-    
-    for (const pattern of patterns) {
-        const match = instruction.match(pattern);
-        if (match && match[1]) {
-            return match[1].trim();
-        }
-    }
-    
+    const patterns = [/onto (.+)$/i, /on (.+)$/i, /toward (.+)$/i, /Head .+ on (.+)$/i];
+    for (const p of patterns) { const m = instruction.match(p); if (m?.[1]) return m[1].trim(); }
     return null;
 }
 
-// FIX #1: Update navigation direction with smart instruction
 function updateNavDirectionSmart(instruction, distanceToManeuver, type) {
     document.getElementById('nav-direction-icon').textContent = getDirectionIcon(type);
     document.getElementById('nav-direction-text').textContent = instruction;
@@ -1382,216 +1298,153 @@ function showArrivedMessage() {
     document.getElementById('nav-direction-distance').textContent = '';
     document.getElementById('nav-distance-remaining').textContent = '0 mi';
     document.getElementById('nav-time-remaining').textContent = '0 min';
+    speak('You have arrived at your destination.');
 }
+
+// ==========================================
+// USER MARKER
+// ==========================================
 
 function updateFullscreenUserMarker(lat, lon, accuracy) {
     if (!state.fullscreenMap) return;
-    
     if (state.fullscreenAccuracyCircle) {
         state.fullscreenAccuracyCircle.setLatLng([lat, lon]).setRadius(Math.min(accuracy, 100));
     } else {
-        state.fullscreenAccuracyCircle = L.circle([lat, lon], {
-            radius: Math.min(accuracy, 100),
-            color: '#4285F4',
-            fillColor: '#4285F4',
-            fillOpacity: 0.15,
-            weight: 2
-        }).addTo(state.fullscreenMap);
+        state.fullscreenAccuracyCircle = L.circle([lat, lon], { radius:Math.min(accuracy,100), color:'#4285F4', fillColor:'#4285F4', fillOpacity:0.15, weight:2 }).addTo(state.fullscreenMap);
     }
-    
     if (state.fullscreenUserMarker) {
         state.fullscreenUserMarker.setLatLng([lat, lon]);
     } else {
-        // FIX #4: Use a proper car SVG that can be rotated
         state.fullscreenUserMarker = L.marker([lat, lon], {
             icon: L.divIcon({
                 className: 'nav-user-marker',
-                html: '<div class="car-icon" id="car-icon"><svg viewBox="0 0 24 24" width="32" height="32"><path fill="#2563eb" d="M12 2L4 12h3v8h10v-8h3L12 2z"/><circle fill="#fff" cx="12" cy="12" r="3"/></svg></div>',
-                iconSize: [40, 40],
-                iconAnchor: [20, 20]
+                html: `<div class="car-icon" id="car-icon"><svg viewBox="0 0 40 60" width="36" height="54"><rect x="6" y="14" width="28" height="36" rx="8" ry="6" fill="#2563eb"/><rect x="10" y="18" width="20" height="10" rx="4" ry="3" fill="#93c5fd"/><rect x="12" y="38" width="16" height="7" rx="3" ry="2" fill="#93c5fd"/><rect x="9" y="12" width="7" height="4" rx="2" fill="#fbbf24"/><rect x="24" y="12" width="7" height="4" rx="2" fill="#fbbf24"/><rect x="9" y="48" width="6" height="3" rx="1" fill="#ef4444"/><rect x="25" y="48" width="6" height="3" rx="1" fill="#ef4444"/><rect x="3" y="18" width="5" height="10" rx="2" fill="#1e293b"/><rect x="32" y="18" width="5" height="10" rx="2" fill="#1e293b"/><rect x="3" y="36" width="5" height="10" rx="2" fill="#1e293b"/><rect x="32" y="36" width="5" height="10" rx="2" fill="#1e293b"/><polygon points="20,22 16,28 24,28" fill="white" opacity="0.8"/></svg></div>`,
+                iconSize: [36, 54], iconAnchor: [18, 27]
             }),
             zIndexOffset: 1000
         }).addTo(state.fullscreenMap);
     }
 }
 
-// FIX #4: Rotate car icon based on heading
 function rotateCarIcon(heading) {
     const carIcon = document.getElementById('car-icon');
     if (carIcon && heading != null && !isNaN(heading)) {
-        // When map rotates, car should point "up" (in direction of travel)
-        // If map rotation is enabled, car stays pointing up
-        // If map rotation is disabled (north-up), car rotates with heading
-        if (state.isFollowMode) {
-            // Map is rotating, car points up
-            carIcon.style.transform = 'rotate(0deg)';
-        } else {
-            // Map is north-up, car rotates with heading
-            carIcon.style.transform = `rotate(${heading}deg)`;
-        }
+        carIcon.style.transform = state.isFollowMode ? 'rotate(0deg)' : `rotate(${heading}deg)`;
     }
 }
 
 function updateMainMapUserMarker(lat, lon, accuracy) {
     if (!state.map) return;
-    
-    if (state.userAccuracyCircle) {
-        state.userAccuracyCircle.setLatLng([lat, lon]).setRadius(accuracy);
-    } else {
-        state.userAccuracyCircle = L.circle([lat, lon], {
-            radius: accuracy,
-            color: '#4285F4',
-            fillColor: '#4285F4',
-            fillOpacity: 0.15,
-            weight: 1
-        }).addTo(state.map);
-    }
-    
-    if (state.userLocationMarker) {
-        state.userLocationMarker.setLatLng([lat, lon]);
-    } else {
+    if (state.userAccuracyCircle) { state.userAccuracyCircle.setLatLng([lat, lon]).setRadius(accuracy); }
+    else { state.userAccuracyCircle = L.circle([lat, lon], { radius:accuracy, color:'#4285F4', fillColor:'#4285F4', fillOpacity:0.15, weight:1 }).addTo(state.map); }
+    if (state.userLocationMarker) { state.userLocationMarker.setLatLng([lat, lon]); }
+    else {
         state.userLocationMarker = L.marker([lat, lon], {
-            icon: L.divIcon({
-                className: 'user-location-marker',
-                html: '<div class="user-dot-outer"></div><div class="user-dot-inner"></div>',
-                iconSize: [24, 24],
-                iconAnchor: [12, 12]
-            }),
+            icon: L.divIcon({ className:'user-location-marker', html:'<div class="user-dot-outer"></div><div class="user-dot-inner"></div>', iconSize:[24,24], iconAnchor:[12,12] }),
             zIndexOffset: 1000
         }).addTo(state.map);
     }
-    
     document.getElementById('user-location-legend').classList.remove('hidden');
 }
 
+// ==========================================
+// MAP ROTATION & CONTROLS
+// ==========================================
+
 function rotateMapToHeading(heading) {
     if (!state.fullscreenMap || !state.isFollowMode || state.isPanning) return;
-    
     const wrapper = document.getElementById('map-rotation-wrapper');
-    if (wrapper) {
-        wrapper.style.transform = `translate(-50%, -50%) rotate(${-heading}deg)`;
-    }
-    
+    if (wrapper) wrapper.style.transform = `translate(-50%, -50%) rotate(${-heading}deg)`;
     const compass = document.getElementById('compass-indicator');
-    if (compass) {
-        compass.style.transform = `rotate(${-heading}deg)`;
-    }
+    if (compass) compass.style.transform = `rotate(${-heading}deg)`;
 }
 
 function toggleNorthUp() {
     state.isFollowMode = !state.isFollowMode;
     const btn = document.getElementById('toggle-north-btn');
-    
     if (state.isFollowMode) {
-        btn.classList.add('active');
-        btn.innerHTML = '🧭';
+        btn.classList.add('active'); btn.innerHTML = '🧭';
         if (state.currentHeading) rotateMapToHeading(state.currentHeading);
-        if (state.currentUserLocation) {
-            state.fullscreenMap.setView([state.currentUserLocation.lat, state.currentUserLocation.lon], 17);
-        }
-        rotateCarIcon(0); // Car points up when map rotates
+        if (state.currentUserLocation) state.fullscreenMap.setView([state.currentUserLocation.lat, state.currentUserLocation.lon], 17);
+        rotateCarIcon(0);
     } else {
-        btn.classList.remove('active');
-        btn.innerHTML = '🔺';
+        btn.classList.remove('active'); btn.innerHTML = '🔺';
         const wrapper = document.getElementById('map-rotation-wrapper');
         if (wrapper) wrapper.style.transform = 'translate(-50%, -50%) rotate(0deg)';
-        rotateCarIcon(state.lastValidHeading); // Car rotates when map is north-up
+        rotateCarIcon(state.lastValidHeading);
     }
 }
 
 function recenterFullscreenMap() {
     state.isFollowMode = true;
     state.isPanning = false;
-    document.getElementById('toggle-north-btn').classList.add('active');
-    document.getElementById('toggle-north-btn').innerHTML = '🧭';
-    
+    const btn = document.getElementById('toggle-north-btn');
+    btn.classList.add('active'); btn.innerHTML = '🧭';
     if (state.currentUserLocation && state.fullscreenMap) {
-        state.fullscreenMap.setView([state.currentUserLocation.lat, state.currentUserLocation.lon], 17, { animate: true });
+        state.fullscreenMap.setView([state.currentUserLocation.lat, state.currentUserLocation.lon], 17, { animate:true });
         if (state.currentHeading) rotateMapToHeading(state.currentHeading);
     }
 }
 
 function recenterOnUser() {
-    if (state.currentUserLocation && state.map) {
-        state.map.setView([state.currentUserLocation.lat, state.currentUserLocation.lon], 15, { animate: true });
-    }
+    if (state.currentUserLocation && state.map) state.map.setView([state.currentUserLocation.lat, state.currentUserLocation.lon], 15, { animate:true });
 }
 
 // ==========================================
-// OFF-ROUTE DETECTION
+// OFF-ROUTE DETECTION & REROUTE
 // ==========================================
 
 function isOffRoute(lat, lon) {
-    if (!state.activeRouteCoords || state.activeRouteCoords.length < 2) return false;
-    if (state.hasArrived) return false;
-    
+    if (!state.activeRouteCoords || state.activeRouteCoords.length < 2 || state.hasArrived) return false;
     let minDist = Infinity;
-    
     for (let i = 0; i < state.activeRouteCoords.length; i++) {
         const [rLat, rLon] = state.activeRouteCoords[i];
-        const dist = getDistanceMeters(lat, lon, rLat, rLon);
-        if (dist < minDist) minDist = dist;
+        const d = getDistanceMeters(lat, lon, rLat, rLon);
+        if (d < minDist) minDist = d;
         if (minDist < 30) return false;
     }
-    
     return minDist > CONFIG.OFF_ROUTE_THRESHOLD;
-}
-
-function getDistanceMeters(lat1, lon1, lat2, lon2) {
-    const R = 6371000;
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat/2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon/2) ** 2;
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
 async function performReroute() {
     const now = Date.now();
     if (now - state.lastRerouteTime < CONFIG.REROUTE_COOLDOWN || state.isRerouting) return;
     if (!state.currentUserLocation || !state.endCoords) return;
-    
     state.isRerouting = true;
     state.lastRerouteTime = now;
     document.getElementById('rerouting-toast').classList.remove('hidden');
-    
+
     try {
-        const route = await fetchRoute(state.currentUserLocation, state.endCoords, 'shortest');
-        
+        const route = await fetchRoute(state.currentUserLocation, state.endCoords, state.selectedRoute);
         if (state.fullscreenRouteLayer) state.fullscreenMap.removeLayer(state.fullscreenRouteLayer);
-        
+        if (state.fullscreenCompletedLayer) state.fullscreenMap.removeLayer(state.fullscreenCompletedLayer);
+
         state.activeRouteCoords = route.geometry;
         state.activeRouteSteps = route.steps;
         state.currentStepIndex = 0;
-        
-        // Recalculate cumulative distances
+        state.minProgressIndex = 0;
+        state.activeRouteTotalDistance = computeGeometryDistance(route.geometry);
+        state.activeRouteDuration = route.duration;
+        state.lastVoiceStepIndex = -1;
+        state.lastVoiceStage = '';
+
         state.stepCumulativeDistance = [];
         let cumDist = 0;
-        route.steps.forEach(step => {
-            state.stepCumulativeDistance.push(cumDist);
-            cumDist += step.distance || 0;
-        });
-        
-        // Update route average speed
-        if (route.distance > 0 && route.duration > 0) {
-            state.routeAvgSpeed = (route.distance / route.duration) * 60;
-        }
-        
-        state.fullscreenRouteLayer = L.polyline(route.geometry, {
-            color: '#2563eb',
-            weight: 8,
-            opacity: 0.9
-        }).addTo(state.fullscreenMap);
-        
+        route.steps.forEach(step => { state.stepCumulativeDistance.push(cumDist); cumDist += step.distance || 0; });
+        if (route.distance > 0 && route.duration > 0) state.routeAvgSpeed = (route.distance / route.duration) * 60;
+
+        state.fullscreenRouteLayer = L.polyline(route.geometry, { color:'#2563eb', weight:8, opacity:0.9 }).addTo(state.fullscreenMap);
+        state.fullscreenCompletedLayer = L.polyline([], { color:'#9ca3af', weight:6, opacity:0.5 }).addTo(state.fullscreenMap);
+
         document.getElementById('nav-distance-remaining').textContent = `${route.distance.toFixed(1)} mi`;
         document.getElementById('nav-time-remaining').textContent = `${Math.round(route.duration)} min`;
-        
         if (route.steps?.[0]) updateNavDirection(route.steps[0], route.steps[0].distance);
-        
         fetchTrafficData(route.geometry);
-        
-        console.log('✓ Rerouted via', route.source);
+        speak('Route recalculated.');
     } catch (err) {
+        // Enhancement #4: Graceful offline handling
         console.error('Reroute failed:', err);
+        speak('Unable to recalculate route. Continuing with current directions.');
     } finally {
         state.isRerouting = false;
         document.getElementById('rerouting-toast').classList.add('hidden');
@@ -1603,27 +1456,8 @@ async function performReroute() {
 // UI HELPERS
 // ==========================================
 
-function showLoading() {
-    document.getElementById('loading-spinner').classList.remove('hidden');
-    document.getElementById('search-btn').disabled = true;
-}
-
-function hideLoading() {
-    document.getElementById('loading-spinner').classList.add('hidden');
-    document.getElementById('search-btn').disabled = false;
-}
-
-function showError(msg) {
-    const el = document.getElementById('error-message');
-    el.textContent = msg;
-    el.classList.remove('hidden');
-}
-
-function hideError() {
-    document.getElementById('error-message').classList.add('hidden');
-}
-
-function hideResults() {
-    document.getElementById('results-section').classList.add('hidden');
-    document.getElementById('elevation-card').classList.add('hidden');
-}
+function showLoading() { document.getElementById('loading-spinner').classList.remove('hidden'); document.getElementById('search-btn').disabled = true; }
+function hideLoading() { document.getElementById('loading-spinner').classList.add('hidden'); document.getElementById('search-btn').disabled = false; }
+function showError(msg) { const el = document.getElementById('error-message'); el.textContent = msg; el.classList.remove('hidden'); }
+function hideError() { document.getElementById('error-message').classList.add('hidden'); }
+function hideResults() { document.getElementById('results-section').classList.add('hidden'); document.getElementById('elevation-card').classList.add('hidden'); }

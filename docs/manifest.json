@@ -1,7 +1,7 @@
 {
     "name": "MileSaver - Save Miles, Save Money",
     "short_name": "MileSaver",
-    "description": "Find shortest routes to save money",
+    "description": "Find shortest routes to save money on fuel and mileage",
     "start_url": "/",
     "display": "standalone",
     "background_color": "#1a1a2e",

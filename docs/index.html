@@ -20,8 +20,11 @@
     <div id="app">
         <header class="header">
             <div class="header-content">
-                <h1>💰 MileSaver</h1>
-                <p class="tagline">Find Shortest Routes, Save Money</p>
+                <div class="header-left">
+                    <h1>💰 MileSaver</h1>
+                    <p class="tagline">Find Shortest Routes, Save Money</p>
+                </div>
+                <button id="toggle-night-btn" class="night-toggle-btn" title="Night mode: auto">🌗</button>
             </div>
         </header>
 
@@ -39,16 +42,16 @@
                         <div class="input-group">
                             <label>🟢 Start</label>
                             <div class="input-with-button">
-                                <input type="text" id="start-location" placeholder="Type address..." autocomplete="off">
-                                <button type="button" id="use-my-location-btn" class="location-btn">📍</button>
+                                <input type="text" id="start-location" placeholder="Type address..." autocomplete="off" aria-label="Start location">
+                                <button type="button" id="use-my-location-btn" class="location-btn" aria-label="Use my location">📍</button>
                             </div>
                         </div>
                         <div class="swap-container">
-                            <button type="button" id="swap-btn" class="swap-btn">⇅</button>
+                            <button type="button" id="swap-btn" class="swap-btn" aria-label="Swap start and end">⇅</button>
                         </div>
                         <div class="input-group">
                             <label>🔴 End</label>
-                            <input type="text" id="end-location" placeholder="Type address..." autocomplete="off">
+                            <input type="text" id="end-location" placeholder="Type address..." autocomplete="off" aria-label="End location">
                         </div>
                     </div>
                     
@@ -56,13 +59,13 @@
                         <div class="input-group">
                             <label>🟢 Start</label>
                             <div class="input-with-button">
-                                <input type="text" id="start-coords" placeholder="47.6062, -122.3321" autocomplete="off">
-                                <button type="button" id="use-my-location-coords-btn" class="location-btn">📍</button>
+                                <input type="text" id="start-coords" placeholder="47.6062, -122.3321" autocomplete="off" aria-label="Start coordinates">
+                                <button type="button" id="use-my-location-coords-btn" class="location-btn" aria-label="Use my location">📍</button>
                             </div>
                         </div>
                         <div class="input-group">
                             <label>🔴 End</label>
-                            <input type="text" id="end-coords" placeholder="47.5301, -122.0357" autocomplete="off">
+                            <input type="text" id="end-coords" placeholder="47.5301, -122.0357" autocomplete="off" aria-label="End coordinates">
                         </div>
                     </div>
                 </div>
@@ -71,37 +74,37 @@
                     <h3 class="card-subtitle">⚙️ Preferences</h3>
                     <div class="setting-group">
                         <label>Extra time OK: <strong id="time-tolerance-value">30</strong> min</label>
-                        <input type="range" id="time-tolerance" min="0" max="120" step="10" value="30">
+                        <input type="range" id="time-tolerance" min="0" max="120" step="10" value="30" aria-label="Time tolerance">
                     </div>
                     <div class="setting-group">
                         <label>Trips/month: <strong id="trips-per-month-value">4</strong>x</label>
-                        <input type="range" id="trips-per-month" min="1" max="30" value="4">
+                        <input type="range" id="trips-per-month" min="1" max="30" value="4" aria-label="Trips per month">
                     </div>
                     <div class="setting-group">
                         <label>Cost per mile: $<strong id="cost-per-mile-value">0.25</strong></label>
-                        <input type="range" id="cost-per-mile" min="0.10" max="1.00" step="0.05" value="0.25">
+                        <input type="range" id="cost-per-mile" min="0.10" max="1.00" step="0.05" value="0.25" aria-label="Cost per mile">
                     </div>
                     <div class="setting-group">
                         <label>Min savings: <strong id="min-savings-value">0.5</strong>+ mi</label>
-                        <input type="range" id="min-savings" min="0" max="5" step="0.5" value="0.5">
+                        <input type="range" id="min-savings" min="0" max="5" step="0.5" value="0.5" aria-label="Minimum savings">
                     </div>
                 </div>
 
                 <button id="search-btn" class="search-btn">🔍 Find Best Route</button>
 
-                <div id="error-message" class="error-message hidden"></div>
+                <div id="error-message" class="error-message hidden" role="alert"></div>
 
                 <div id="results-section" class="results-section hidden">
-                    <div id="recommendation-card" class="recommendation-card"></div>
+                    <div id="recommendation-card" class="recommendation-card" role="status"></div>
 
                     <div class="routes-comparison-compact">
-                        <div class="route-card-compact shortest" data-route="shortest">
+                        <div class="route-card-compact shortest" data-route="shortest" role="button" tabindex="0">
                             <div class="route-header">SHORTEST</div>
                             <div id="shortest-distance" class="stat-value">-</div>
                             <div id="shortest-duration" class="route-time">-</div>
                             <small class="route-hint">Click for directions</small>
                         </div>
-                        <div class="route-card-compact fastest" data-route="fastest">
+                        <div class="route-card-compact fastest" data-route="fastest" role="button" tabindex="0">
                             <div class="route-header">FASTEST</div>
                             <div id="fastest-distance" class="stat-value">-</div>
                             <div id="fastest-duration" class="route-time">-</div>
@@ -134,20 +137,32 @@
                     <div id="directions-panel" class="directions-panel hidden">
                         <div class="directions-header">
                             <h3 id="directions-title">📍 Directions</h3>
-                            <button id="close-directions" class="close-btn">✕</button>
+                            <button id="close-directions" class="close-btn" aria-label="Close directions">✕</button>
                         </div>
                         <div id="directions-content" class="directions-content"></div>
+                    </div>
+                </div>
+
+                <!-- TRIP HISTORY (Enhancement #9) -->
+                <div class="card trip-history-card">
+                    <div class="trip-history-header">
+                        <h3 class="card-subtitle">📊 Trip History</h3>
+                        <button id="clear-history-btn" class="clear-history-btn" aria-label="Clear trip history">Clear</button>
+                    </div>
+                    <div id="history-stats" class="history-stats"></div>
+                    <div id="trip-history-list" class="trip-history-list">
+                        <p class="history-empty">No trips yet. Navigate a route to start tracking!</p>
                     </div>
                 </div>
             </aside>
 
             <section class="map-section-large">
-                <div id="map" class="map-container-large"></div>
+                <div id="map" class="map-container-large" role="application" aria-label="Route map"></div>
                 <div id="loading-spinner" class="loading-spinner hidden">
                     <div class="spinner"></div>
                     <p>Finding routes...</p>
                 </div>
-                <button id="recenter-btn" class="recenter-btn hidden">🎯</button>
+                <button id="recenter-btn" class="recenter-btn hidden" aria-label="Recenter map on user">🎯</button>
                 <div id="map-legend" class="map-legend hidden">
                     <div class="legend-title">Routes</div>
                     <div class="legend-item"><span class="legend-line shortest"></span><span>Shortest</span></div>
@@ -159,18 +174,19 @@
     </div>
 
     <!-- FULLSCREEN NAVIGATION -->
-    <div id="fullscreen-nav" class="fullscreen-nav hidden">
+    <div id="fullscreen-nav" class="fullscreen-nav hidden" role="region" aria-label="Turn-by-turn navigation">
         <div class="fullscreen-map-container">
             <div id="map-rotation-wrapper">
-                <div id="fullscreen-map"></div>
+                <div id="fullscreen-map" role="application" aria-label="Navigation map"></div>
             </div>
         </div>
         
         <div class="nav-header">
-            <button id="exit-nav-btn" class="exit-nav-btn">✕ Exit</button>
-            <div class="nav-status">
-                <span id="nav-distance-remaining">--</span>
-                <span id="nav-time-remaining">--</span>
+            <button id="exit-nav-btn" class="exit-nav-btn" aria-label="Exit navigation">✕ Exit</button>
+            <div class="nav-status" role="status" aria-live="polite">
+                <span id="nav-distance-remaining" aria-label="Distance remaining">--</span>
+                <span class="nav-separator">|</span>
+                <span id="nav-time-remaining" aria-label="Time remaining">--</span>
             </div>
         </div>
         
@@ -180,11 +196,12 @@
         
         <div class="speed-limit-display">
             <div class="speed-limit-sign" id="speed-limit-sign"><span id="speed-limit-value">--</span></div>
-            <div class="current-speed" id="current-speed">-- mph</div>
+            <div class="current-speed" id="current-speed" aria-label="Current speed">-- mph</div>
         </div>
         
-        <div class="current-direction-card">
-            <div class="direction-icon" id="nav-direction-icon">⬆️</div>
+        <!-- Direction card with ARIA live region (#11) -->
+        <div class="current-direction-card" role="status" aria-live="assertive" aria-atomic="true">
+            <div class="direction-icon" id="nav-direction-icon" aria-hidden="true">⬆️</div>
             <div class="direction-info">
                 <div class="direction-text" id="nav-direction-text">Start navigation</div>
                 <div class="direction-distance" id="nav-direction-distance">--</div>
@@ -192,19 +209,21 @@
         </div>
         
         <div class="nav-controls">
-            <button id="fullscreen-recenter-btn" class="fullscreen-recenter-btn">🎯</button>
-            <button id="toggle-north-btn" class="nav-control-btn active">🧭</button>
+            <button id="fullscreen-recenter-btn" class="fullscreen-recenter-btn" aria-label="Recenter map">🎯</button>
+            <button id="toggle-north-btn" class="nav-control-btn active" aria-label="Toggle north-up mode">🧭</button>
+            <button id="toggle-voice-btn" class="nav-control-btn active" aria-label="Toggle voice navigation">🔊</button>
         </div>
         
-        <div id="rerouting-toast" class="rerouting-toast hidden">
+        <div id="rerouting-toast" class="rerouting-toast hidden" role="alert">
             <div class="rerouting-spinner"></div>
             <span>Rerouting...</span>
         </div>
         
-        <div id="off-route-warning" class="off-route-warning hidden">⚠️ Recalculating route...</div>
+        <div id="off-route-warning" class="off-route-warning hidden" role="alert">⚠️ Recalculating route...</div>
+        <div id="wrong-way-warning" class="wrong-way-warning hidden" role="alert">🔄 Wrong way — please turn around</div>
         
         <!-- ARRIVED NOTIFICATION -->
-        <div id="arrived-toast" class="arrived-toast hidden">
+        <div id="arrived-toast" class="arrived-toast hidden" role="alert">
             <div class="arrived-icon">🎉</div>
             <div class="arrived-text">You have arrived!</div>
         </div>
