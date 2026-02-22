@@ -1387,24 +1387,29 @@ function updateFullscreenUserMarker(lat, lon, accuracy) {
         state.fullscreenUserMarker.setLatLng([lat, lon]);
     } else {
         state.fullscreenUserMarker = L.marker([lat, lon], {
-            icon: L.divIcon({
-                className: 'nav-user-marker',
-                html: `<div class="car-icon" id="car-icon"><svg viewBox="0 0 32 32" width="32" height="32"><defs><filter id="ns" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-opacity="0.4"/></filter></defs><polygon points="16,2 28,26 16,20 4,26" fill="#2563eb" filter="url(#ns)"/><polygon points="16,7 23,22 16,18 9,22" fill="#60a5fa"/></svg></div>`,
-                iconSize: [32, 32], iconAnchor: [16, 16]
-            }),
+            icon: createNavIcon(state.lastValidHeading),
             zIndexOffset: 1000
         }).addTo(state.fullscreenMap);
     }
 }
 
+// Build a rotated navigation icon — called on every heading change
+function createNavIcon(heading) {
+    const angle = heading || 0;
+    return L.divIcon({
+        className: 'nav-user-marker',
+        html: `<div class="nav-puck" style="transform:rotate(${angle}deg)">` +
+              `<div class="nav-beam"></div>` +
+              `<div class="nav-dot"></div>` +
+              `</div>`,
+        iconSize: [48, 48],
+        iconAnchor: [24, 24]
+    });
+}
+
 function rotateCarIcon(heading) {
-    const carIcon = document.getElementById('car-icon');
-    if (carIcon && heading != null && !isNaN(heading)) {
-        // Always rotate car to heading. In follow mode the map is rotated by -heading,
-        // so the car's visual heading = heading + (-heading) = 0 = pointing up = forward.
-        // In north-up mode the map is at 0, so car visually points at its true heading.
-        carIcon.style.transform = `rotate(${heading}deg)`;
-    }
+    if (!state.fullscreenUserMarker || heading == null || isNaN(heading)) return;
+    state.fullscreenUserMarker.setIcon(createNavIcon(heading));
 }
 
 function updateMainMapUserMarker(lat, lon, accuracy) {

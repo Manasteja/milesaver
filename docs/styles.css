@@ -441,11 +441,33 @@ body.night-mode .savings-card-compact { background: linear-gradient(135deg, #052
 }
 .nav-control-btn.active { background: var(--primary); color: white; }
 
-/* CAR ICON */
+/* NAV PUCK — Google Maps style blue dot with directional beam */
 .nav-user-marker { position: relative; }
-.car-icon {
-    filter: drop-shadow(0 3px 6px rgba(0,0,0,0.5));
-    transition: transform 0.3s ease-out;
+.nav-puck {
+    width: 48px; height: 48px;
+    position: relative;
+    /* transform is set inline per heading — no CSS transition to avoid lag */
+}
+.nav-dot {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 20px; height: 20px;
+    background: #4285F4;
+    border: 3px solid white;
+    border-radius: 50%;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    z-index: 2;
+}
+.nav-beam {
+    position: absolute;
+    top: -2px; left: 50%;
+    transform: translateX(-50%);
+    width: 0; height: 0;
+    border-left: 14px solid transparent;
+    border-right: 14px solid transparent;
+    border-bottom: 22px solid rgba(66,133,244,0.35);
+    z-index: 1;
 }
 
 .destination-marker .dest-icon {
