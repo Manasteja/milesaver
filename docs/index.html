@@ -53,6 +53,7 @@
                             <label>🔴 End</label>
                             <input type="text" id="end-location" placeholder="Type address..." autocomplete="off" aria-label="End location">
                         </div>
+                        <div id="recent-destinations-list" class="recent-destinations-list"></div>
                     </div>
                     
                     <div id="coordinate-inputs" class="input-container hidden">
@@ -121,7 +122,18 @@
                         <div class="elevation-row total"><span id="elevation-label">Change:</span><span id="elevation-diff" class="elevation-value">--</span></div>
                     </div>
 
-                    <button id="start-nav-btn" class="start-nav-btn">🚗 Start Navigation</button>
+                    <div class="nav-actions-row">
+                        <button id="start-nav-btn" class="start-nav-btn">🚗 Start Navigation</button>
+                        <button id="save-route-btn" class="save-route-btn" aria-label="Save this route">⭐</button>
+                    </div>
+
+                    <!-- Saved Routes -->
+                    <div class="card saved-routes-card">
+                        <h3 class="card-subtitle">⭐ Saved Routes</h3>
+                        <div id="saved-routes-list" class="saved-routes-list">
+                            <p class="history-empty">No saved routes yet.</p>
+                        </div>
+                    </div>
 
                     <div class="savings-card-compact">
                         <div class="savings-header">💰 Your Savings</div>
@@ -152,6 +164,47 @@
                     <div id="history-stats" class="history-stats"></div>
                     <div id="trip-history-list" class="trip-history-list">
                         <p class="history-empty">No trips yet. Navigate a route to start tracking!</p>
+                    </div>
+                </div>
+
+                <!-- CUMULATIVE SAVINGS DASHBOARD (#7) -->
+                <div id="cumulative-dashboard" class="card cumulative-dashboard hidden">
+                    <h3 class="card-subtitle">🏆 Lifetime Impact</h3>
+                    <div class="dash-grid">
+                        <div class="dash-item"><span class="dash-label">Trips</span><span class="dash-val" id="dash-total-trips">0</span></div>
+                        <div class="dash-item"><span class="dash-label">Driven</span><span class="dash-val" id="dash-total-miles">0</span></div>
+                        <div class="dash-item"><span class="dash-label">Miles Saved</span><span class="dash-val dash-highlight" id="dash-total-saved">0</span></div>
+                        <div class="dash-item"><span class="dash-label">Money Saved</span><span class="dash-val dash-highlight" id="dash-money-saved">$0</span></div>
+                        <div class="dash-item"><span class="dash-label">CO₂ Avoided</span><span class="dash-val" id="dash-co2">0 kg</span></div>
+                        <div class="dash-item"><span class="dash-label">Equivalent</span><span class="dash-val" id="dash-trees">🌳 0</span></div>
+                    </div>
+                </div>
+
+                <!-- LEASE MILEAGE BUDGET TRACKER (#1) -->
+                <div class="card lease-card">
+                    <h3 class="card-subtitle">🚘 Lease Mileage Tracker</h3>
+                    <div id="lease-form" class="lease-form">
+                        <div class="lease-form-grid">
+                            <div class="input-group"><label>Total miles allowed</label><input type="number" id="lease-total-miles" placeholder="36000" aria-label="Total lease miles"></div>
+                            <div class="input-group"><label>Lease months</label><input type="number" id="lease-months" placeholder="36" aria-label="Lease length months"></div>
+                            <div class="input-group"><label>Start date</label><input type="date" id="lease-start-date" aria-label="Lease start date"></div>
+                            <div class="input-group"><label>Overage fee/mi</label><input type="number" id="lease-overage-fee" placeholder="0.25" step="0.01" aria-label="Overage fee per mile"></div>
+                        </div>
+                        <div class="lease-form-actions">
+                            <button id="lease-save-btn" class="lease-save-btn">Save Lease Info</button>
+                        </div>
+                    </div>
+                    <div id="lease-dashboard" class="lease-dashboard hidden">
+                        <div id="lease-status-text" class="lease-status-ok">✅ On track</div>
+                        <div class="lease-progress-bar"><div id="lease-progress-fill" class="lease-progress-fill on-track"></div></div>
+                        <div class="lease-time-bar"><div id="lease-time-fill" class="lease-time-fill"></div></div>
+                        <div class="lease-stats-grid">
+                            <div class="lease-stat"><span class="lease-label">Remaining</span><span class="lease-value" id="lease-miles-remaining">--</span></div>
+                            <div class="lease-stat"><span class="lease-label">Daily Budget</span><span class="lease-value" id="lease-daily-budget">--</span></div>
+                            <div class="lease-stat"><span class="lease-label">Burn Rate</span><span class="lease-value" id="lease-burn-rate">--</span></div>
+                            <div class="lease-stat"><span class="lease-label">Projected Penalty</span><span class="lease-value" id="lease-projected-penalty">$0</span></div>
+                        </div>
+                        <button id="lease-clear-btn" class="clear-history-btn">Edit Lease</button>
                     </div>
                 </div>
             </aside>
@@ -212,6 +265,7 @@
             <button id="fullscreen-recenter-btn" class="fullscreen-recenter-btn" aria-label="Recenter map">🎯</button>
             <button id="toggle-north-btn" class="nav-control-btn active" aria-label="Toggle north-up mode">🧭</button>
             <button id="toggle-voice-btn" class="nav-control-btn active" aria-label="Toggle voice navigation">🔊</button>
+            <button id="share-eta-btn" class="nav-control-btn" aria-label="Share ETA">📤</button>
         </div>
         
         <div id="rerouting-toast" class="rerouting-toast hidden" role="alert">
@@ -226,6 +280,25 @@
         <div id="arrived-toast" class="arrived-toast hidden" role="alert">
             <div class="arrived-icon">🎉</div>
             <div class="arrived-text">You have arrived!</div>
+        </div>
+    </div>
+
+    <!-- ROUTE SUMMARY MODAL (#6) -->
+    <div id="route-summary-modal" class="route-summary-modal hidden">
+        <div class="summary-card">
+            <h3 class="summary-title">🚗 Ready to Navigate</h3>
+            <div id="summary-type" class="summary-type">📍 Shortest Distance</div>
+            <div class="summary-grid">
+                <div class="summary-item"><span class="summary-label">Distance</span><span class="summary-val" id="summary-distance">--</span></div>
+                <div class="summary-item"><span class="summary-label">Est. Time</span><span class="summary-val" id="summary-time">--</span></div>
+                <div class="summary-item"><span class="summary-label">Turns</span><span class="summary-val" id="summary-turns">--</span></div>
+            </div>
+            <div id="summary-savings" class="summary-savings neutral">--</div>
+            <div id="summary-source" class="summary-source">--</div>
+            <div class="summary-actions">
+                <button id="summary-cancel-btn" class="summary-cancel-btn">Cancel</button>
+                <button id="summary-start-btn" class="summary-start-btn">▶ Start</button>
+            </div>
         </div>
     </div>
 

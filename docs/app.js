@@ -1,21 +1,22 @@
 /**
- * MileSaver v14 - FULL ENHANCEMENT SUITE
+ * MileSaver v14.1 - FULL ENHANCEMENT SUITE + WORLD-CLASS FEATURES
  * 
  * ROUTING: ORS → GraphHopper → OSRM
  * 
- * v14 ENHANCEMENTS (on top of v13 fixes):
- * 1.  Voice turn-by-turn prompts (Web Speech API) with 500m / 200m / at-turn stages
- * 2.  Route progress visualization (gray completed / blue remaining polylines)
- * 3.  Segment-projection snap-to-route (not just nearest vertex)
- * 4.  Offline resilience (graceful reroute failure, cached active route)
- * 5.  Wrong-way detection (heading vs route bearing comparison)
- * 6.  Monotonic step advancement (no backward jumps)
- * 7.  Overpass traffic-data caching (avoids redundant API calls)
- * 8.  Night mode (auto-detect + toggle, CartoDB dark tiles)
- * 9.  Trip history with cumulative savings (localStorage)
- * 10. Adaptive GPS intervals (tighter near turns, relaxed on straights)
- * 11. ARIA live regions for screen-reader accessibility
- * 12. All v13 fixes preserved (touch/swipe, car icon, distance tracking, etc.)
+ * v14 ENHANCEMENTS:
+ * 1-12. Voice nav, route progress, snap-to-route, offline resilience,
+ *       wrong-way detection, monotonic steps, Overpass caching, night mode,
+ *       trip history, adaptive GPS, ARIA accessibility, v13 fixes
+ * 
+ * v14.1 NEW FEATURES:
+ * 13. Lease mileage budget tracker (miles remaining, daily budget, projected penalty)
+ * 14. Saved/favorite routes (one-tap re-navigation)
+ * 15. Overspeed alert (visual flash + voice warning when exceeding limit)
+ * 16. Recent destinations (last 10 searched, quick-fill end field)
+ * 17. Share ETA (Web Share API / clipboard fallback)
+ * 18. Route summary before navigation (distance, turns, savings confirmation)
+ * 19. Cumulative savings dashboard (lifetime miles, money, CO₂, trees equivalent)
+ * 20. Landscape navigation support (CSS)
  */
 
 const CONFIG = {
@@ -111,6 +112,12 @@ const state = {
     tripHistory: [],
     navStartTime: null,
     wrongWayCount: 0,
+
+    // v14.1 new state
+    leaseConfig: null,         // { totalMiles, leaseMonths, startDate, overageFee, startOdometer }
+    savedRoutes: [],
+    recentDestinations: [],
+    lastOverspeedVoiceTime: 0,
 };
 
 // ==========================================
@@ -121,6 +128,9 @@ document.addEventListener('DOMContentLoaded', initializeApp);
 
 function initializeApp() {
     loadTripHistory();
+    loadLeaseConfig();
+    loadSavedRoutes();
+    loadRecentDestinations();
     detectNightMode();
 
     initializeMap();
@@ -132,13 +142,24 @@ function initializeApp() {
     document.getElementById('swap-btn').addEventListener('click', swapLocations);
     document.getElementById('use-my-location-btn').addEventListener('click', useMyLocationForStart);
     document.getElementById('use-my-location-coords-btn').addEventListener('click', useMyLocationForStartCoords);
-    document.getElementById('start-nav-btn').addEventListener('click', startFullscreenNavigation);
+    document.getElementById('start-nav-btn').addEventListener('click', showRouteSummary);
     document.getElementById('exit-nav-btn').addEventListener('click', exitFullscreenNavigation);
     document.getElementById('fullscreen-recenter-btn').addEventListener('click', recenterFullscreenMap);
     document.getElementById('toggle-north-btn').addEventListener('click', toggleNorthUp);
     document.getElementById('toggle-voice-btn').addEventListener('click', toggleVoice);
     document.getElementById('toggle-night-btn').addEventListener('click', toggleNightMode);
     document.getElementById('clear-history-btn')?.addEventListener('click', clearTripHistory);
+    document.getElementById('share-eta-btn')?.addEventListener('click', shareETA);
+    document.getElementById('save-route-btn')?.addEventListener('click', saveCurrentRoute);
+    document.getElementById('lease-save-btn')?.addEventListener('click', saveLeaseConfig);
+    document.getElementById('lease-clear-btn')?.addEventListener('click', clearLeaseConfig);
+    document.getElementById('summary-start-btn')?.addEventListener('click', () => {
+        document.getElementById('route-summary-modal').classList.add('hidden');
+        startFullscreenNavigation();
+    });
+    document.getElementById('summary-cancel-btn')?.addEventListener('click', () => {
+        document.getElementById('route-summary-modal').classList.add('hidden');
+    });
 
     document.querySelectorAll('.route-card-compact').forEach(card => {
         card.addEventListener('click', () => {
@@ -157,7 +178,11 @@ function initializeApp() {
     document.getElementById('end-location').addEventListener('input', () => state.googleEndCoords = null);
 
     renderTripHistory();
-    console.log('MileSaver v14 initialized');
+    renderSavedRoutes();
+    renderRecentDestinations();
+    renderLeaseTracker();
+    renderCumulativeDashboard();
+    console.log('MileSaver v14.1 initialized');
 }
 
 function initializeMap() {
@@ -314,6 +339,8 @@ function logTrip(routeData, milesSaved) {
     state.tripHistory.push(trip);
     saveTripHistory();
     renderTripHistory();
+    updateLeaseMilesUsed(routeData.distance);
+    renderCumulativeDashboard();
 }
 
 function renderTripHistory() {
@@ -519,6 +546,16 @@ async function handleSearch() {
         drawRoutes(shortestRoute, fastestRoute);
         displayResults(comparison);
         fetchBothElevations(start, end);
+
+        // Save recent destinations
+        const startLabel = mode === 'coordinates'
+            ? document.getElementById('start-coords').value.trim()
+            : document.getElementById('start-location').value.trim();
+        const endLabel = mode === 'coordinates'
+            ? document.getElementById('end-coords').value.trim()
+            : document.getElementById('end-location').value.trim();
+        saveRecentDestination(endLabel, end);
+        saveRecentDestination(startLabel, start);
     } catch (error) {
         console.error('Search error:', error);
         showError(error.message);
@@ -724,19 +761,50 @@ function displayTrafficMarkersNearUser(userLat, userLon) {
     if (!state.fullscreenMap) return;
     state.trafficMarkers.forEach(m => state.fullscreenMap.removeLayer(m));
     state.trafficMarkers = [];
-    const r = CONFIG.TRAFFIC_MARKER_RADIUS;
+
+    // Only show markers that are near the route AHEAD of the user (not behind, not off-route)
+    const aheadCoords = state.activeRouteCoords.slice(state.minProgressIndex);
+    if (aheadCoords.length < 2) return;
+
+    // Limit lookahead to ~800m of route ahead
+    let lookaheadDist = 0;
+    let lookaheadEnd = Math.min(aheadCoords.length, 2);
+    for (let i = 0; i < aheadCoords.length - 1 && lookaheadDist < 800; i++) {
+        const [a1, a2] = aheadCoords[i];
+        const [b1, b2] = aheadCoords[i + 1];
+        lookaheadDist += getDistanceMeters(a1, a2, b1, b2);
+        lookaheadEnd = i + 2;
+    }
+    const routeAhead = aheadCoords.slice(0, lookaheadEnd);
+
+    function isNearRouteAhead(lat, lon, threshold) {
+        for (let i = 0; i < routeAhead.length; i++) {
+            if (getDistanceMeters(lat, lon, routeAhead[i][0], routeAhead[i][1]) <= threshold) return true;
+        }
+        return false;
+    }
+
+    // Show at most 3 stop signs that are within 30m of the route ahead
+    let stopCount = 0;
     state.stopSigns.forEach(s => {
-        if (getDistanceMeters(userLat, userLon, s.lat, s.lon) <= r) {
+        if (stopCount >= 3) return;
+        if (isNearRouteAhead(s.lat, s.lon, 30)) {
             state.trafficMarkers.push(L.marker([s.lat, s.lon], {
                 icon: L.divIcon({ className:'traffic-marker', html:'<div class="stop-sign">STOP</div>', iconSize:[30,30], iconAnchor:[15,15] }), interactive:false
             }).addTo(state.fullscreenMap));
+            stopCount++;
         }
     });
+
+    // Show at most 3 traffic signals within 30m of route ahead
+    let sigCount = 0;
     state.trafficSignals.forEach(s => {
-        if (getDistanceMeters(userLat, userLon, s.lat, s.lon) <= r) {
+        if (sigCount >= 3) return;
+        if (isNearRouteAhead(s.lat, s.lon, 30)) {
             state.trafficMarkers.push(L.marker([s.lat, s.lon], {
                 icon: L.divIcon({ className:'traffic-marker', html:'<div class="traffic-light">🚦</div>', iconSize:[24,24], iconAnchor:[12,12] }), interactive:false
             }).addTo(state.fullscreenMap));
+            sigCount++;
         }
     });
 }
@@ -1095,6 +1163,9 @@ function startNavigationGPS() {
             state.currentSpeed = speed ? Math.round(speed * 2.23694) : 0;
             document.getElementById('current-speed').textContent = `${state.currentSpeed} mph`;
 
+            // Feature: Overspeed alert
+            checkOverspeed();
+
             const isAccurate = accuracy <= 60;
 
             updateSpeedLimitBubble(lat, lon);
@@ -1318,8 +1389,8 @@ function updateFullscreenUserMarker(lat, lon, accuracy) {
         state.fullscreenUserMarker = L.marker([lat, lon], {
             icon: L.divIcon({
                 className: 'nav-user-marker',
-                html: `<div class="car-icon" id="car-icon"><svg viewBox="0 0 40 60" width="36" height="54"><rect x="6" y="14" width="28" height="36" rx="8" ry="6" fill="#2563eb"/><rect x="10" y="18" width="20" height="10" rx="4" ry="3" fill="#93c5fd"/><rect x="12" y="38" width="16" height="7" rx="3" ry="2" fill="#93c5fd"/><rect x="9" y="12" width="7" height="4" rx="2" fill="#fbbf24"/><rect x="24" y="12" width="7" height="4" rx="2" fill="#fbbf24"/><rect x="9" y="48" width="6" height="3" rx="1" fill="#ef4444"/><rect x="25" y="48" width="6" height="3" rx="1" fill="#ef4444"/><rect x="3" y="18" width="5" height="10" rx="2" fill="#1e293b"/><rect x="32" y="18" width="5" height="10" rx="2" fill="#1e293b"/><rect x="3" y="36" width="5" height="10" rx="2" fill="#1e293b"/><rect x="32" y="36" width="5" height="10" rx="2" fill="#1e293b"/><polygon points="20,22 16,28 24,28" fill="white" opacity="0.8"/></svg></div>`,
-                iconSize: [36, 54], iconAnchor: [18, 27]
+                html: `<div class="car-icon" id="car-icon"><svg viewBox="0 0 32 32" width="32" height="32"><defs><filter id="ns" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-opacity="0.4"/></filter></defs><polygon points="16,2 28,26 16,20 4,26" fill="#2563eb" filter="url(#ns)"/><polygon points="16,7 23,22 16,18 9,22" fill="#60a5fa"/></svg></div>`,
+                iconSize: [32, 32], iconAnchor: [16, 16]
             }),
             zIndexOffset: 1000
         }).addTo(state.fullscreenMap);
@@ -1329,7 +1400,10 @@ function updateFullscreenUserMarker(lat, lon, accuracy) {
 function rotateCarIcon(heading) {
     const carIcon = document.getElementById('car-icon');
     if (carIcon && heading != null && !isNaN(heading)) {
-        carIcon.style.transform = state.isFollowMode ? 'rotate(0deg)' : `rotate(${heading}deg)`;
+        // Always rotate car to heading. In follow mode the map is rotated by -heading,
+        // so the car's visual heading = heading + (-heading) = 0 = pointing up = forward.
+        // In north-up mode the map is at 0, so car visually points at its true heading.
+        carIcon.style.transform = `rotate(${heading}deg)`;
     }
 }
 
@@ -1366,7 +1440,7 @@ function toggleNorthUp() {
         btn.classList.add('active'); btn.innerHTML = '🧭';
         if (state.currentHeading) rotateMapToHeading(state.currentHeading);
         if (state.currentUserLocation) state.fullscreenMap.setView([state.currentUserLocation.lat, state.currentUserLocation.lon], 17);
-        rotateCarIcon(0);
+        rotateCarIcon(state.lastValidHeading);
     } else {
         btn.classList.remove('active'); btn.innerHTML = '🔺';
         const wrapper = document.getElementById('map-rotation-wrapper');
@@ -1450,6 +1524,307 @@ async function performReroute() {
         document.getElementById('rerouting-toast').classList.add('hidden');
         document.getElementById('off-route-warning').classList.add('hidden');
     }
+}
+
+// ==========================================
+// FEATURE: OVERSPEED ALERT (#3)
+// ==========================================
+
+function checkOverspeed() {
+    const speedEl = document.getElementById('current-speed');
+    if (!speedEl) return;
+
+    if (state.currentSpeedLimit && state.currentSpeed > state.currentSpeedLimit) {
+        speedEl.classList.add('overspeed');
+        // Voice warning at most once per 30 seconds
+        const now = Date.now();
+        if (state.voiceEnabled && now - state.lastOverspeedVoiceTime > 30000) {
+            state.lastOverspeedVoiceTime = now;
+            speak(`Speed limit ${state.currentSpeedLimit}. Slow down.`);
+        }
+    } else {
+        speedEl.classList.remove('overspeed');
+    }
+}
+
+// ==========================================
+// FEATURE: LEASE MILEAGE BUDGET TRACKER (#1)
+// ==========================================
+
+function loadLeaseConfig() {
+    try {
+        state.leaseConfig = JSON.parse(localStorage.getItem('milesaver_lease'));
+    } catch { state.leaseConfig = null; }
+}
+
+function saveLeaseConfig() {
+    const totalMiles = parseFloat(document.getElementById('lease-total-miles')?.value);
+    const leaseMonths = parseInt(document.getElementById('lease-months')?.value);
+    const startDate = document.getElementById('lease-start-date')?.value;
+    const overageFee = parseFloat(document.getElementById('lease-overage-fee')?.value);
+
+    if (!totalMiles || !leaseMonths || !startDate || !overageFee) {
+        showError('Fill in all lease fields');
+        return;
+    }
+
+    state.leaseConfig = {
+        totalMiles, leaseMonths, startDate, overageFee,
+        milesUsed: state.leaseConfig?.milesUsed || 0
+    };
+    try { localStorage.setItem('milesaver_lease', JSON.stringify(state.leaseConfig)); } catch {}
+    renderLeaseTracker();
+    hideError();
+}
+
+function clearLeaseConfig() {
+    if (!confirm('Clear lease configuration?')) return;
+    state.leaseConfig = null;
+    localStorage.removeItem('milesaver_lease');
+    renderLeaseTracker();
+}
+
+function updateLeaseMilesUsed(tripMiles) {
+    if (!state.leaseConfig) return;
+    state.leaseConfig.milesUsed = (state.leaseConfig.milesUsed || 0) + tripMiles;
+    try { localStorage.setItem('milesaver_lease', JSON.stringify(state.leaseConfig)); } catch {}
+    renderLeaseTracker();
+}
+
+function renderLeaseTracker() {
+    const dashboard = document.getElementById('lease-dashboard');
+    const form = document.getElementById('lease-form');
+    if (!dashboard || !form) return;
+
+    if (!state.leaseConfig) {
+        dashboard.classList.add('hidden');
+        form.classList.remove('hidden');
+        return;
+    }
+
+    form.classList.add('hidden');
+    dashboard.classList.remove('hidden');
+
+    const c = state.leaseConfig;
+    const leaseStart = new Date(c.startDate);
+    const now = new Date();
+    const msElapsed = now - leaseStart;
+    const monthsElapsed = Math.max(0.1, msElapsed / (1000 * 60 * 60 * 24 * 30.44));
+    const monthsRemaining = Math.max(0, c.leaseMonths - monthsElapsed);
+
+    const milesUsed = c.milesUsed || 0;
+    const milesRemaining = Math.max(0, c.totalMiles - milesUsed);
+    const dailyBudget = monthsRemaining > 0 ? milesRemaining / (monthsRemaining * 30.44) : 0;
+    const burnRate = milesUsed / monthsElapsed;
+    const projectedTotal = burnRate * c.leaseMonths;
+    const projectedOverage = Math.max(0, projectedTotal - c.totalMiles);
+    const projectedPenalty = projectedOverage * c.overageFee;
+
+    const pctUsed = Math.min(100, (milesUsed / c.totalMiles) * 100);
+    const pctTime = Math.min(100, (monthsElapsed / c.leaseMonths) * 100);
+    const onTrack = pctUsed <= pctTime;
+
+    document.getElementById('lease-miles-remaining').textContent = `${Math.round(milesRemaining).toLocaleString()} mi`;
+    document.getElementById('lease-daily-budget').textContent = `${dailyBudget.toFixed(1)} mi/day`;
+    document.getElementById('lease-burn-rate').textContent = `${burnRate.toFixed(0)} mi/mo`;
+    document.getElementById('lease-projected-penalty').textContent = projectedPenalty > 0 ? `$${projectedPenalty.toFixed(0)}` : '$0';
+    document.getElementById('lease-projected-penalty').className = projectedPenalty > 0 ? 'lease-value lease-danger' : 'lease-value lease-ok';
+    document.getElementById('lease-status-text').textContent = onTrack ? '✅ On track' : '⚠️ Over budget';
+    document.getElementById('lease-status-text').className = onTrack ? 'lease-status-ok' : 'lease-status-warn';
+
+    const bar = document.getElementById('lease-progress-fill');
+    if (bar) {
+        bar.style.width = `${pctUsed}%`;
+        bar.className = `lease-progress-fill ${onTrack ? 'on-track' : 'over-budget'}`;
+    }
+    const timeBar = document.getElementById('lease-time-fill');
+    if (timeBar) timeBar.style.width = `${pctTime}%`;
+}
+
+// ==========================================
+// FEATURE: SAVED ROUTES (#2)
+// ==========================================
+
+function loadSavedRoutes() {
+    try { state.savedRoutes = JSON.parse(localStorage.getItem('milesaver_saved_routes') || '[]'); }
+    catch { state.savedRoutes = []; }
+}
+
+function saveCurrentRoute() {
+    const startLabel = document.getElementById('start-location')?.value || document.getElementById('start-coords')?.value || '';
+    const endLabel = document.getElementById('end-location')?.value || document.getElementById('end-coords')?.value || '';
+    if (!state.startCoords || !state.endCoords || !startLabel || !endLabel) {
+        showError('Search a route first');
+        return;
+    }
+    // Don't duplicate
+    if (state.savedRoutes.some(r => r.startLabel === startLabel && r.endLabel === endLabel)) return;
+
+    state.savedRoutes.push({
+        startLabel, endLabel,
+        startCoords: state.startCoords,
+        endCoords: state.endCoords,
+        savedAt: new Date().toISOString()
+    });
+    if (state.savedRoutes.length > 20) state.savedRoutes.shift();
+    try { localStorage.setItem('milesaver_saved_routes', JSON.stringify(state.savedRoutes)); } catch {}
+    renderSavedRoutes();
+}
+
+function useSavedRoute(index) {
+    const r = state.savedRoutes[index];
+    if (!r) return;
+    const mode = document.querySelector('input[name="input-mode"]:checked').value;
+    if (mode === 'coordinates') {
+        document.getElementById('start-coords').value = `${r.startCoords.lat}, ${r.startCoords.lon}`;
+        document.getElementById('end-coords').value = `${r.endCoords.lat}, ${r.endCoords.lon}`;
+    } else {
+        document.getElementById('start-location').value = r.startLabel;
+        document.getElementById('end-location').value = r.endLabel;
+        state.googleStartCoords = r.startCoords;
+        state.googleEndCoords = r.endCoords;
+    }
+    handleSearch();
+}
+
+function deleteSavedRoute(index) {
+    state.savedRoutes.splice(index, 1);
+    try { localStorage.setItem('milesaver_saved_routes', JSON.stringify(state.savedRoutes)); } catch {}
+    renderSavedRoutes();
+}
+
+function renderSavedRoutes() {
+    const container = document.getElementById('saved-routes-list');
+    if (!container) return;
+    if (state.savedRoutes.length === 0) {
+        container.innerHTML = '<p class="history-empty">No saved routes yet.</p>';
+        return;
+    }
+    container.innerHTML = state.savedRoutes.map((r, i) => {
+        const endShort = r.endLabel.length > 30 ? r.endLabel.substring(0, 30) + '…' : r.endLabel;
+        return `<div class="saved-route-row"><button class="saved-route-btn" onclick="useSavedRoute(${i})" title="${r.startLabel} → ${r.endLabel}">📍 ${endShort}</button><button class="saved-route-delete" onclick="deleteSavedRoute(${i})" aria-label="Delete">✕</button></div>`;
+    }).join('');
+}
+
+// ==========================================
+// FEATURE: RECENT DESTINATIONS (#4)
+// ==========================================
+
+function loadRecentDestinations() {
+    try { state.recentDestinations = JSON.parse(localStorage.getItem('milesaver_recent') || '[]'); }
+    catch { state.recentDestinations = []; }
+}
+
+function saveRecentDestination(label, coords) {
+    if (!label || !coords) return;
+    // Remove duplicate if exists
+    state.recentDestinations = state.recentDestinations.filter(d => d.label !== label);
+    state.recentDestinations.unshift({ label, coords, time: Date.now() });
+    if (state.recentDestinations.length > 10) state.recentDestinations = state.recentDestinations.slice(0, 10);
+    try { localStorage.setItem('milesaver_recent', JSON.stringify(state.recentDestinations)); } catch {}
+    renderRecentDestinations();
+}
+
+function useRecentAsEnd(index) {
+    const d = state.recentDestinations[index];
+    if (!d) return;
+    const mode = document.querySelector('input[name="input-mode"]:checked').value;
+    if (mode === 'coordinates') {
+        document.getElementById('end-coords').value = `${d.coords.lat}, ${d.coords.lon}`;
+    } else {
+        document.getElementById('end-location').value = d.label;
+        state.googleEndCoords = d.coords;
+    }
+}
+
+function renderRecentDestinations() {
+    const container = document.getElementById('recent-destinations-list');
+    if (!container) return;
+    if (state.recentDestinations.length === 0) {
+        container.innerHTML = '';
+        return;
+    }
+    container.innerHTML = state.recentDestinations.slice(0, 5).map((d, i) => {
+        const short = d.label.length > 35 ? d.label.substring(0, 35) + '…' : d.label;
+        return `<button class="recent-dest-btn" onclick="useRecentAsEnd(${i})" title="${d.label}">🕐 ${short}</button>`;
+    }).join('');
+}
+
+// ==========================================
+// FEATURE: SHARE ETA (#5)
+// ==========================================
+
+function shareETA() {
+    const dist = document.getElementById('nav-distance-remaining')?.textContent || '';
+    const time = document.getElementById('nav-time-remaining')?.textContent || '';
+    const text = `I'm on my way! ${dist} remaining, arriving in ~${time}. Navigating with MileSaver 💰`;
+
+    if (navigator.share) {
+        navigator.share({ title: 'MileSaver ETA', text }).catch(() => {});
+    } else {
+        // Fallback: copy to clipboard
+        navigator.clipboard?.writeText(text).then(() => {
+            const btn = document.getElementById('share-eta-btn');
+            if (btn) { btn.textContent = '✓'; setTimeout(() => btn.textContent = '📤', 1500); }
+        }).catch(() => {});
+    }
+}
+
+// ==========================================
+// FEATURE: ROUTE SUMMARY BEFORE NAV (#6)
+// ==========================================
+
+function showRouteSummary() {
+    const routeData = state.selectedRoute === 'shortest' ? state.shortestRouteData : state.fastestRouteData;
+    if (!routeData) { showError('Find a route first'); return; }
+
+    const modal = document.getElementById('route-summary-modal');
+    if (!modal) { startFullscreenNavigation(); return; }
+
+    document.getElementById('summary-distance').textContent = `${routeData.distance.toFixed(2)} mi`;
+    document.getElementById('summary-time').textContent = `~${Math.round(routeData.duration)} min`;
+    document.getElementById('summary-turns').textContent = `${routeData.steps ? routeData.steps.length - 1 : 0} turns`;
+    document.getElementById('summary-type').textContent = state.selectedRoute === 'shortest' ? '📍 Shortest Distance' : '⚡ Fastest Time';
+    document.getElementById('summary-source').textContent = `via ${routeData.source || 'routing engine'}`;
+
+    const savings = state.routeComparison?.milesSaved || 0;
+    const savingsEl = document.getElementById('summary-savings');
+    if (savingsEl) {
+        savingsEl.textContent = savings > 0.05 ? `Saving ${savings.toFixed(2)} mi vs fastest` : 'Similar to fastest route';
+        savingsEl.className = savings > 0.05 ? 'summary-savings positive' : 'summary-savings neutral';
+    }
+
+    modal.classList.remove('hidden');
+}
+
+// ==========================================
+// FEATURE: CUMULATIVE SAVINGS DASHBOARD (#7)
+// ==========================================
+
+function renderCumulativeDashboard() {
+    const container = document.getElementById('cumulative-dashboard');
+    if (!container) return;
+    if (state.tripHistory.length === 0) {
+        container.classList.add('hidden');
+        return;
+    }
+    container.classList.remove('hidden');
+
+    const totalTrips = state.tripHistory.length;
+    const totalMiles = state.tripHistory.reduce((s, t) => s + (t.distance || 0), 0);
+    const totalSaved = state.tripHistory.reduce((s, t) => s + (t.milesSaved || 0), 0);
+    const costPerMile = parseFloat(document.getElementById('cost-per-mile')?.value || 0.25);
+    const totalMoneySaved = totalSaved * costPerMile;
+    // EPA: avg 404g CO2/mile. A tree absorbs ~22kg CO2/year
+    const co2Saved = totalSaved * 0.404; // kg
+    const treesEquivalent = (co2Saved / 22).toFixed(1);
+
+    document.getElementById('dash-total-trips').textContent = totalTrips;
+    document.getElementById('dash-total-miles').textContent = `${totalMiles.toFixed(1)} mi`;
+    document.getElementById('dash-total-saved').textContent = `${totalSaved.toFixed(1)} mi`;
+    document.getElementById('dash-money-saved').textContent = `$${totalMoneySaved.toFixed(2)}`;
+    document.getElementById('dash-co2').textContent = `${co2Saved.toFixed(1)} kg`;
+    document.getElementById('dash-trees').textContent = `🌳 ≈ ${treesEquivalent} trees/yr`;
 }
 
 // ==========================================

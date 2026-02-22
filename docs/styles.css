@@ -526,6 +526,150 @@ body.night-mode .savings-card-compact { background: linear-gradient(135deg, #052
     100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
 }
 
+/* ========== OVERSPEED ALERT (#3) ========== */
+
+.current-speed.overspeed {
+    background: var(--danger) !important;
+    color: white !important;
+    animation: overspeedFlash 0.6s ease-in-out infinite alternate;
+}
+@keyframes overspeedFlash {
+    from { opacity: 1; }
+    to { opacity: 0.6; }
+}
+
+/* ========== SAVED ROUTES (#2) ========== */
+
+.nav-actions-row {
+    display: flex; gap: 8px;
+}
+.nav-actions-row .start-nav-btn { flex: 1; }
+.save-route-btn {
+    width: 54px; font-size: 22px;
+    background: var(--card-bg); border: 2px solid var(--warning);
+    border-radius: 10px; cursor: pointer;
+    transition: background 0.2s;
+}
+.save-route-btn:hover { background: #fef3c7; }
+
+.saved-routes-list { display: flex; flex-direction: column; gap: 4px; }
+.saved-route-row { display: flex; gap: 4px; }
+.saved-route-btn {
+    flex: 1; padding: 8px 10px; background: var(--gray-50); border: 1px solid var(--border-color);
+    border-radius: 6px; font-size: 12px; text-align: left; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: var(--text-primary);
+}
+.saved-route-btn:hover { background: #dbeafe; border-color: var(--primary); }
+.saved-route-delete {
+    width: 30px; background: transparent; border: 1px solid var(--border-color);
+    border-radius: 6px; font-size: 12px; cursor: pointer; color: var(--text-secondary);
+}
+.saved-route-delete:hover { background: #fef2f2; color: var(--danger); border-color: var(--danger); }
+
+/* ========== RECENT DESTINATIONS (#4) ========== */
+
+.recent-destinations-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.recent-dest-btn {
+    padding: 4px 8px; background: var(--gray-50); border: 1px solid var(--border-color);
+    border-radius: 6px; font-size: 11px; cursor: pointer; color: var(--text-primary);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px;
+}
+.recent-dest-btn:hover { background: #dbeafe; border-color: var(--primary); }
+
+/* ========== ROUTE SUMMARY MODAL (#6) ========== */
+
+.route-summary-modal {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.5); z-index: 9998;
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+}
+.summary-card {
+    background: var(--card-bg); border-radius: 16px; padding: 24px;
+    max-width: 380px; width: 100%; box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+}
+.summary-title { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
+.summary-type { font-size: 14px; color: var(--primary); font-weight: 600; margin-bottom: 16px; }
+.summary-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+.summary-item { text-align: center; }
+.summary-label { display: block; font-size: 11px; color: var(--text-secondary); margin-bottom: 2px; }
+.summary-val { display: block; font-size: 18px; font-weight: 800; }
+.summary-savings { font-size: 13px; font-weight: 600; text-align: center; margin-bottom: 8px; padding: 6px; border-radius: 6px; }
+.summary-savings.positive { background: #f0fdf4; color: var(--success); }
+.summary-savings.neutral { background: var(--gray-100); color: var(--text-secondary); }
+.summary-source { font-size: 11px; color: var(--text-secondary); text-align: center; margin-bottom: 16px; }
+.summary-actions { display: flex; gap: 10px; }
+.summary-cancel-btn {
+    flex: 1; padding: 12px; background: var(--gray-100); border: none;
+    border-radius: 10px; font-size: 15px; font-weight: 600; cursor: pointer; color: var(--text-primary);
+}
+.summary-start-btn {
+    flex: 2; padding: 12px;
+    background: linear-gradient(135deg, var(--success), #15803d);
+    color: white; border: none; border-radius: 10px;
+    font-size: 15px; font-weight: 700; cursor: pointer;
+}
+.summary-start-btn:hover { transform: translateY(-1px); }
+
+/* ========== CUMULATIVE DASHBOARD (#7) ========== */
+
+.cumulative-dashboard { border-color: var(--primary); }
+.dash-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.dash-item { text-align: center; padding: 6px; background: var(--gray-50); border-radius: 6px; }
+.dash-label { display: block; font-size: 10px; color: var(--text-secondary); }
+.dash-val { display: block; font-size: 14px; font-weight: 700; }
+.dash-highlight { color: var(--success); }
+
+/* ========== LEASE MILEAGE TRACKER (#1) ========== */
+
+.lease-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+.lease-form-grid .input-group label { font-size: 11px; }
+.lease-form-grid input { padding: 8px; font-size: 13px; }
+.lease-save-btn {
+    width: 100%; padding: 10px; background: var(--primary); color: white;
+    border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.lease-save-btn:hover { background: var(--primary-dark); }
+.lease-form-actions { margin-top: 4px; }
+
+.lease-dashboard { text-align: center; }
+.lease-status-ok { font-size: 14px; font-weight: 700; color: var(--success); margin-bottom: 8px; }
+.lease-status-warn { font-size: 14px; font-weight: 700; color: var(--danger); margin-bottom: 8px; }
+
+.lease-progress-bar, .lease-time-bar {
+    height: 8px; background: var(--gray-200); border-radius: 4px;
+    margin-bottom: 4px; overflow: hidden;
+}
+.lease-progress-fill {
+    height: 100%; border-radius: 4px; transition: width 0.5s;
+}
+.lease-progress-fill.on-track { background: var(--success); }
+.lease-progress-fill.over-budget { background: var(--danger); }
+.lease-time-fill { height: 100%; border-radius: 4px; background: var(--primary); opacity: 0.4; }
+
+.lease-stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 10px 0 8px; }
+.lease-stat { text-align: center; padding: 6px; background: var(--gray-50); border-radius: 6px; }
+.lease-label { display: block; font-size: 10px; color: var(--text-secondary); }
+.lease-value { display: block; font-size: 14px; font-weight: 700; }
+.lease-danger { color: var(--danger) !important; }
+.lease-ok { color: var(--success); }
+
+/* ========== LANDSCAPE NAV SUPPORT (#8) ========== */
+
+@media (orientation: landscape) and (max-height: 500px) {
+    .current-direction-card {
+        bottom: 10px; left: 10px; right: auto; width: 55%;
+        padding: 12px; border-radius: 12px;
+    }
+    .direction-icon { width: 40px; height: 40px; font-size: 24px; }
+    .direction-text { font-size: 14px; }
+    .nav-controls { bottom: 80px; }
+    .speed-limit-display { top: 60px; }
+    .nav-header { padding: 6px 12px; padding-top: calc(6px + env(safe-area-inset-top)); }
+    .nav-status { font-size: 12px; }
+}
+
 .hidden { display: none !important; }
 
 /* ========== RESPONSIVE ========== */
