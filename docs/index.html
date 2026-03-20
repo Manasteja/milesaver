@@ -26,6 +26,10 @@
                 </div>
                 <button id="toggle-night-btn" class="night-toggle-btn" title="Night mode: auto">🌗</button>
             </div>
+            <nav class="app-tabs">
+                <button class="app-tab active" id="tab-navigate" onclick="switchTab('navigate')">🗺️ Navigate</button>
+                <button class="app-tab" id="tab-proxiwake" onclick="switchTab('proxiwake')">📍 ProxiWake</button>
+            </nav>
         </header>
 
         <main class="main-layout">
@@ -224,6 +228,107 @@
                 </div>
             </section>
         </main>
+
+        <!-- ═══════ PROXIWAKE SECTION ═══════ -->
+        <div id="proxiwake-section" class="pw-section hidden">
+            <!-- SETUP VIEW -->
+            <div id="pw-setup" class="pw-setup-view">
+                <!-- Travel Mode -->
+                <div class="pw-card">
+                    <div class="pw-card-title">TRAVEL MODE</div>
+                    <div class="pw-modes">
+                        <button class="pw-mode-btn active" id="pw-m-bus" onclick="pwSetMode('bus')">
+                            <span class="pw-mode-icon">🚌</span><span class="pw-mode-label">Bus</span><span class="pw-mode-sub">City & intercity</span>
+                        </button>
+                        <button class="pw-mode-btn" id="pw-m-train" onclick="pwSetMode('train')">
+                            <span class="pw-mode-icon">🚆</span><span class="pw-mode-label">Train</span><span class="pw-mode-sub">Rail & metro</span>
+                        </button>
+                        <button class="pw-mode-btn" id="pw-m-flight" onclick="pwSetMode('flight')">
+                            <span class="pw-mode-icon">✈️</span><span class="pw-mode-label">Flight</span><span class="pw-mode-sub">Aerial sightseeing</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Destination (uses Google Places from MileSaver) -->
+                <div class="pw-card">
+                    <div class="pw-card-title">DESTINATION</div>
+                    <input type="text" class="pw-input" id="pw-search" placeholder="Search any place, station, city..." autocomplete="off" aria-label="ProxiWake destination search">
+                    <div class="pw-coord-row">
+                        <input type="text" class="pw-input" id="pw-lat" inputmode="decimal" placeholder="Latitude" aria-label="Target latitude">
+                        <input type="text" class="pw-input" id="pw-lng" inputmode="decimal" placeholder="Longitude" aria-label="Target longitude">
+                    </div>
+                    <button class="pw-gps-btn" onclick="pwUseGPS()">📍 Use my current GPS position</button>
+                </div>
+
+                <!-- Alert Radius -->
+                <div class="pw-card">
+                    <div class="pw-card-title">ALERT RADIUS</div>
+                    <div class="pw-slider-header">
+                        <span>Wake me when within</span>
+                        <span class="pw-slider-value" id="pw-rad-val">1.0 km</span>
+                    </div>
+                    <input type="range" class="pw-range" id="pw-radius-slider" min="200" max="10000" step="100" value="1000" oninput="pwOnRadius()">
+                    <div class="pw-slider-labels"><span id="pw-rad-min">200 m</span><span id="pw-rad-max">10 km</span></div>
+                </div>
+
+                <!-- Alarm Intensity -->
+                <div class="pw-card">
+                    <div class="pw-card-title">ALARM INTENSITY</div>
+                    <div class="pw-alarm-levels">
+                        <button class="pw-alarm-btn pw-a-green" id="pw-a1" onclick="pwSetAlarm(1)">
+                            <span class="pw-alarm-label">Gentle</span><span class="pw-alarm-desc">Vibrate only</span>
+                        </button>
+                        <button class="pw-alarm-btn pw-a-yellow" id="pw-a2" onclick="pwSetAlarm(2)">
+                            <span class="pw-alarm-label">Moderate</span><span class="pw-alarm-desc">Vibrate + tone</span>
+                        </button>
+                        <button class="pw-alarm-btn" id="pw-a3" onclick="pwSetAlarm(3)">
+                            <span class="pw-alarm-label">Aggressive</span><span class="pw-alarm-desc">Full volume + flash</span>
+                        </button>
+                    </div>
+                </div>
+
+                <button id="pw-activate" class="pw-btn-activate pw-disabled" onclick="pwActivate()">Enter destination to activate</button>
+                <p class="pw-footer">ProxiWake · Keep this tab open while traveling · Screen Wake Lock keeps display active</p>
+            </div>
+
+            <!-- TRACKING VIEW -->
+            <div id="pw-tracking" class="pw-tracking-view" style="display:none">
+                <div class="pw-dest-info">
+                    <div class="pw-dest-icon" id="pw-t-icon">🚌</div>
+                    <div class="pw-dest-name" id="pw-t-name">—</div>
+                    <div class="pw-dest-coords" id="pw-t-coords">—</div>
+                </div>
+
+                <div class="pw-radar">
+                    <div class="pw-radar-ring pw-ring-on"></div>
+                    <div class="pw-radar-ring pw-ring-on" style="animation-delay:1s"></div>
+                    <div class="pw-radar-ring pw-ring-on" style="animation-delay:2s"></div>
+                    <div class="pw-radar-dot pw-tracking" id="pw-r-dot">
+                        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M16.24 7.76a6 6 0 010 8.49"/><path d="M19.07 4.93a10 10 0 010 14.14"/></svg>
+                    </div>
+                </div>
+
+                <div class="pw-distance-box" id="pw-d-box">
+                    <div class="pw-dist-label" id="pw-d-label">Distance remaining</div>
+                    <div class="pw-dist-val" id="pw-d-val">Acquiring GPS...</div>
+                </div>
+
+                <div class="pw-progress-bar"><div class="pw-progress-fill" id="pw-p-fill"></div></div>
+                <div class="pw-progress-labels"><span id="pw-elapsed">Tracking for 0s</span><span id="pw-pct">0% there</span></div>
+
+                <div class="pw-info-grid">
+                    <div class="pw-info-cell"><small>Your lat</small><div class="pw-mono" id="pw-my-lat">—</div></div>
+                    <div class="pw-info-cell"><small>Your lng</small><div class="pw-mono" id="pw-my-lng">—</div></div>
+                    <div class="pw-info-cell"><small>Target lat</small><div class="pw-mono" id="pw-tgt-lat">—</div></div>
+                    <div class="pw-info-cell"><small>Target lng</small><div class="pw-mono" id="pw-tgt-lng">—</div></div>
+                </div>
+
+                <div class="pw-status-bar"><div class="pw-status-dot pw-dot-green"></div><div class="pw-status-text"><b>Smart battery mode</b><br><span id="pw-bat-text">Acquiring position...</span></div></div>
+                <div class="pw-status-bar"><div class="pw-status-dot pw-dot-yellow" id="pw-wl-dot"></div><div class="pw-status-text"><b>Screen Wake Lock</b><br><span id="pw-wl-text">Requesting...</span></div></div>
+
+                <button class="pw-btn-stop" onclick="pwDeactivate()">Deactivate Alarm</button>
+            </div>
+        </div>
     </div>
 
     <!-- FULLSCREEN NAVIGATION -->

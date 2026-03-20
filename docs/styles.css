@@ -441,33 +441,13 @@ body.night-mode .savings-card-compact { background: linear-gradient(135deg, #052
 }
 .nav-control-btn.active { background: var(--primary); color: white; }
 
-/* NAV PUCK — Google Maps style blue dot with directional beam */
-.nav-user-marker { position: relative; }
-.nav-puck {
-    width: 48px; height: 48px;
-    position: relative;
-    /* transform is set inline per heading — no CSS transition to avoid lag */
+/* NAV PUCK — Google Maps style blue dot with directional cone (SVG-based) */
+.nav-user-marker {
+    background: none !important;
+    border: none !important;
 }
-.nav-dot {
-    position: absolute;
-    top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    width: 20px; height: 20px;
-    background: #4285F4;
-    border: 3px solid white;
-    border-radius: 50%;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
-    z-index: 2;
-}
-.nav-beam {
-    position: absolute;
-    top: -2px; left: 50%;
-    transform: translateX(-50%);
-    width: 0; height: 0;
-    border-left: 14px solid transparent;
-    border-right: 14px solid transparent;
-    border-bottom: 22px solid rgba(66,133,244,0.35);
-    z-index: 1;
+.nav-user-marker svg {
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));
 }
 
 .destination-marker .dest-icon {
@@ -676,6 +656,180 @@ body.night-mode .savings-card-compact { background: linear-gradient(135deg, #052
 .lease-value { display: block; font-size: 14px; font-weight: 700; }
 .lease-danger { color: var(--danger) !important; }
 .lease-ok { color: var(--success); }
+
+/* ========== APP TABS ========== */
+
+.app-tabs {
+    display: flex; gap: 0; margin-top: 8px;
+    background: rgba(0,0,0,0.2); border-radius: 8px; padding: 3px;
+}
+.app-tab {
+    flex: 1; padding: 8px 12px; border: none; border-radius: 6px;
+    background: transparent; color: rgba(255,255,255,0.6);
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    font-family: inherit; transition: all 0.2s;
+}
+.app-tab.active {
+    background: rgba(255,255,255,0.15); color: white;
+}
+
+/* ========== PROXIWAKE SECTION ========== */
+
+.pw-section {
+    flex: 1; overflow-y: auto; padding: 16px;
+    max-width: 500px; margin: 0 auto; width: 100%;
+}
+.pw-setup-view { display: flex; flex-direction: column; gap: 0; }
+.pw-tracking-view { display: flex; flex-direction: column; align-items: center; }
+
+.pw-card {
+    background: var(--card-bg); border: 1px solid var(--border-color);
+    border-radius: 12px; padding: 16px; margin-bottom: 12px;
+}
+.pw-card-title {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--text-secondary); margin-bottom: 10px;
+}
+
+.pw-modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.pw-mode-btn {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: var(--gray-50); border: 2px solid transparent; border-radius: 10px;
+    padding: 12px 4px; cursor: pointer; min-height: 80px;
+    font-family: inherit; transition: border-color 0.2s, background 0.2s;
+}
+.pw-mode-btn.active { border-color: #10B981; background: rgba(16,185,129,0.08); }
+.pw-mode-icon { font-size: 24px; margin-bottom: 4px; }
+.pw-mode-label { font-size: 13px; font-weight: 600; }
+.pw-mode-sub { font-size: 10px; color: var(--text-secondary); margin-top: 2px; }
+
+.pw-input {
+    width: 100%; padding: 10px 12px; border: 2px solid var(--border-color);
+    border-radius: 8px; font-size: 16px; font-family: inherit;
+    background: var(--card-bg); color: var(--text-primary);
+    margin-bottom: 8px; transition: border-color 0.2s;
+}
+.pw-input:focus { outline: none; border-color: #10B981; }
+
+.pw-coord-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pw-coord-row .pw-input { margin-bottom: 0; }
+
+.pw-gps-btn {
+    width: 100%; padding: 10px; margin-top: 8px;
+    background: transparent; border: 1px dashed var(--border-color);
+    border-radius: 8px; color: #10B981; font-size: 13px; font-weight: 600;
+    cursor: pointer; font-family: inherit;
+}
+.pw-gps-btn:hover { border-color: #10B981; }
+
+.pw-slider-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+.pw-slider-header span { font-size: 13px; color: var(--text-secondary); }
+.pw-slider-value { font-size: 18px; font-weight: 700; color: #10B981; font-variant-numeric: tabular-nums; }
+.pw-range {
+    width: 100%; height: 6px; -webkit-appearance: none; appearance: none;
+    background: var(--gray-200); border-radius: 3px; outline: none;
+}
+.pw-range::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 22px; height: 22px;
+    border-radius: 50%; background: #10B981; cursor: pointer;
+}
+.pw-slider-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-top: 6px; }
+
+.pw-alarm-levels { display: flex; gap: 8px; }
+.pw-alarm-btn {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; background: var(--gray-50);
+    border: 2px solid transparent; border-radius: 10px;
+    padding: 10px 4px; cursor: pointer; min-height: 60px; font-family: inherit;
+    transition: border-color 0.2s;
+}
+.pw-a-green { border-color: #10B981; }
+.pw-a-yellow { border-color: #F59E0B; }
+.pw-a-red { border-color: #EF4444; }
+.pw-alarm-label { font-size: 13px; font-weight: 600; }
+.pw-alarm-desc { font-size: 10px; color: var(--text-secondary); margin-top: 2px; }
+.pw-a-green .pw-alarm-label { color: #10B981; }
+.pw-a-yellow .pw-alarm-label { color: #F59E0B; }
+.pw-a-red .pw-alarm-label { color: #EF4444; }
+
+.pw-btn-activate {
+    width: 100%; padding: 16px; border: none; border-radius: 12px;
+    font-size: 16px; font-weight: 700; cursor: pointer; margin-top: 8px;
+    font-family: inherit; transition: all 0.2s;
+}
+.pw-btn-activate.pw-ready { background: #10B981; color: white; }
+.pw-btn-activate.pw-disabled { background: var(--gray-200); color: var(--text-secondary); pointer-events: none; }
+
+.pw-footer {
+    text-align: center; font-size: 11px; color: var(--text-secondary);
+    margin-top: 12px; padding: 8px; line-height: 1.5;
+}
+
+/* ── ProxiWake Tracking View ── */
+.pw-dest-info { text-align: center; margin-bottom: 12px; }
+.pw-dest-icon { font-size: 32px; margin-bottom: 4px; }
+.pw-dest-name { font-size: 18px; font-weight: 600; }
+.pw-dest-coords { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; margin-top: 2px; }
+
+.pw-radar {
+    position: relative; width: 140px; height: 140px;
+    display: flex; align-items: center; justify-content: center; margin: 12px 0;
+}
+.pw-radar-ring {
+    position: absolute; width: 100%; height: 100%;
+    border-radius: 50%; border: 2px solid #10B981; opacity: 0;
+}
+.pw-ring-on { animation: pwPulseRing 3s ease-out infinite; }
+.pw-radar-ring:nth-child(2) { animation-delay: 1s; }
+.pw-radar-ring:nth-child(3) { animation-delay: 2s; }
+@keyframes pwPulseRing { 0% { transform: scale(0.6); opacity: 0.7; } 100% { transform: scale(2.2); opacity: 0; } }
+
+.pw-radar-dot {
+    width: 50px; height: 50px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+}
+.pw-radar-dot.pw-tracking { background: #10B981; animation: pwPulseDot 2s ease-in-out infinite; }
+.pw-radar-dot.pw-arriving { background: #EF4444; animation: pwPulseDot 0.7s ease-in-out infinite; }
+@keyframes pwPulseDot { 0%,100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+
+.pw-distance-box {
+    width: 100%; padding: 20px; border-radius: 12px; text-align: center;
+    margin-bottom: 12px; background: var(--card-bg); border: 1px solid var(--border-color);
+}
+.pw-distance-box.pw-alert { border: 2px solid #EF4444; background: rgba(239,68,68,0.08); }
+.pw-dist-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
+.pw-dist-val { font-size: 36px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.pw-alert-text { color: #EF4444; font-weight: 600; animation: pwBlink 1s infinite; }
+@keyframes pwBlink { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.pw-progress-bar { width: 100%; height: 6px; border-radius: 3px; background: var(--gray-200); overflow: hidden; }
+.pw-progress-fill { height: 100%; border-radius: 3px; background: #10B981; transition: width 1s ease; width: 0; }
+.pw-progress-labels { display: flex; justify-content: space-between; width: 100%; font-size: 11px; color: var(--text-secondary); margin: 6px 0 12px; }
+
+.pw-info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; margin-bottom: 10px; }
+.pw-info-cell { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 8px 10px; }
+.pw-info-cell small { font-size: 10px; color: var(--text-secondary); text-transform: uppercase; }
+.pw-mono { font-size: 12px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+
+.pw-status-bar {
+    width: 100%; display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: 8px;
+    background: var(--card-bg); border: 1px solid var(--border-color);
+    margin-bottom: 8px; font-size: 12px;
+}
+.pw-status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.pw-dot-green { background: #10B981; }
+.pw-dot-yellow { background: #F59E0B; }
+.pw-status-text { line-height: 1.4; color: var(--text-secondary); }
+.pw-status-text b { color: var(--text-primary); font-weight: 600; }
+
+.pw-btn-stop {
+    width: 100%; padding: 14px; margin-top: 12px;
+    border: 2px solid #EF4444; border-radius: 12px;
+    background: transparent; color: #EF4444;
+    font-size: 14px; font-weight: 600; cursor: pointer; font-family: inherit;
+}
+.pw-btn-stop:hover { background: rgba(239,68,68,0.08); }
 
 /* ========== LANDSCAPE NAV SUPPORT (#8) ========== */
 

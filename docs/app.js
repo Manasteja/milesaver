@@ -1025,6 +1025,11 @@ function getBearing(lat1, lon1, lat2, lon2) {
 async function startFullscreenNavigation() {
     const routeData = state.selectedRoute === 'shortest' ? state.shortestRouteData : state.fastestRouteData;
     if (!routeData) { showError('Find a route first'); return; }
+    // Guard: can't navigate if ProxiWake is tracking
+    if (typeof PW !== 'undefined' && PW.active) {
+        showError('Deactivate ProxiWake alarm first before starting navigation.');
+        return;
+    }
 
     state.isNavigating = true;
     state.isFollowMode = true;
@@ -1393,15 +1398,19 @@ function updateFullscreenUserMarker(lat, lon, accuracy) {
     }
 }
 
-// Build a rotated navigation icon — called on every heading change
+// Build a rotated navigation icon — Google Maps style blue dot with directional cone
 function createNavIcon(heading) {
     const angle = heading || 0;
+    // SVG: outer cone (beam) + inner filled circle + white border circle
+    // The cone points UP at 0°, then the whole SVG is rotated by heading
+    const svg = `<svg viewBox="0 0 60 60" width="48" height="48" style="transform:rotate(${angle}deg)">` +
+        `<path d="M30 4 L42 28 Q30 24 18 28 Z" fill="rgba(66,133,244,0.35)"/>` +
+        `<circle cx="30" cy="30" r="11" fill="white"/>` +
+        `<circle cx="30" cy="30" r="8" fill="#4285F4"/>` +
+        `</svg>`;
     return L.divIcon({
         className: 'nav-user-marker',
-        html: `<div class="nav-puck" style="transform:rotate(${angle}deg)">` +
-              `<div class="nav-beam"></div>` +
-              `<div class="nav-dot"></div>` +
-              `</div>`,
+        html: svg,
         iconSize: [48, 48],
         iconAnchor: [24, 24]
     });
@@ -1841,3 +1850,321 @@ function hideLoading() { document.getElementById('loading-spinner').classList.ad
 function showError(msg) { const el = document.getElementById('error-message'); el.textContent = msg; el.classList.remove('hidden'); }
 function hideError() { document.getElementById('error-message').classList.add('hidden'); }
 function hideResults() { document.getElementById('results-section').classList.add('hidden'); document.getElementById('elevation-card').classList.add('hidden'); }
+
+// ==========================================
+// TAB SWITCHING (MileSaver ↔ ProxiWake)
+// ==========================================
+
+function switchTab(tab) {
+    const navSection = document.querySelector('.main-layout');
+    const pwSection = document.getElementById('proxiwake-section');
+    const tabNav = document.getElementById('tab-navigate');
+    const tabPW = document.getElementById('tab-proxiwake');
+
+    if (tab === 'proxiwake') {
+        navSection.classList.add('hidden');
+        pwSection.classList.remove('hidden');
+        tabNav.classList.remove('active');
+        tabPW.classList.add('active');
+        // Init Google Places on ProxiWake search if not done
+        if (!state.pwPlacesInit) pwInitPlaces();
+    } else {
+        pwSection.classList.add('hidden');
+        navSection.classList.remove('hidden');
+        tabPW.classList.remove('active');
+        tabNav.classList.add('active');
+    }
+}
+
+// ==========================================
+// PROXIWAKE — GPS Proximity Alarm Module
+// All functions prefixed pw, state in PW object
+// ==========================================
+
+const PW = {
+    mode: 'bus',
+    name: '',
+    lat: null,
+    lng: null,
+    radius: 1000,
+    alarm: 2,
+    active: false,
+    triggered: false,
+    watchId: null,
+    wakeLock: null,
+    startTime: null,
+    audioCtx: null,
+    intervals: [],
+    initDist: null,
+    MODES: {
+        bus:    { icon: '🚌', radius: 1000,  min: 200,  max: 10000, step: 100  },
+        train:  { icon: '🚆', radius: 2000,  min: 200,  max: 10000, step: 100  },
+        flight: { icon: '✈️', radius: 15000, min: 5000, max: 50000, step: 1000 }
+    }
+};
+
+// ── Google Places integration (reuses MileSaver's API key) ──
+function pwInitPlaces() {
+    if (typeof google === 'undefined' || !google.maps?.places) return;
+    state.pwPlacesInit = true;
+    try {
+        const input = document.getElementById('pw-search');
+        const ac = new google.maps.places.Autocomplete(input, {
+            types: ['geocode', 'establishment'],
+            fields: ['name', 'geometry', 'formatted_address']
+        });
+        ac.addListener('place_changed', () => {
+            const place = ac.getPlace();
+            if (!place.geometry) return;
+            PW.lat = place.geometry.location.lat();
+            PW.lng = place.geometry.location.lng();
+            PW.name = place.name || place.formatted_address;
+            document.getElementById('pw-lat').value = PW.lat.toFixed(6);
+            document.getElementById('pw-lng').value = PW.lng.toFixed(6);
+            pwCheckReady();
+        });
+    } catch (err) { console.warn('ProxiWake Places init error:', err); }
+}
+
+// ── Haversine (meters) ──
+function pwHaversine(lat1, lon1, lat2, lon2) {
+    const R = 6371000, toRad = d => d * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function pwFmtDist(m) { return m >= 1000 ? (m/1000).toFixed(1) + ' km' : Math.round(m) + ' m'; }
+
+// ── Mode selection ──
+function pwSetMode(mode) {
+    PW.mode = mode;
+    const cfg = PW.MODES[mode];
+    PW.radius = cfg.radius;
+    const sl = document.getElementById('pw-radius-slider');
+    sl.min = cfg.min; sl.max = cfg.max; sl.step = cfg.step; sl.value = cfg.radius;
+    document.getElementById('pw-rad-min').textContent = pwFmtDist(cfg.min);
+    document.getElementById('pw-rad-max').textContent = pwFmtDist(cfg.max);
+    document.getElementById('pw-rad-val').textContent = pwFmtDist(cfg.radius);
+    document.querySelectorAll('.pw-mode-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('pw-m-' + mode).classList.add('active');
+}
+
+// ── Alarm level ──
+function pwSetAlarm(level) {
+    PW.alarm = level;
+    document.querySelectorAll('.pw-alarm-btn').forEach(b => {
+        b.classList.remove('pw-a-green', 'pw-a-yellow', 'pw-a-red');
+    });
+    const cls = level === 1 ? 'pw-a-green' : level === 2 ? 'pw-a-yellow' : 'pw-a-red';
+    document.getElementById('pw-a' + level).classList.add(cls);
+}
+
+// ── Radius slider ──
+function pwOnRadius() {
+    PW.radius = parseInt(document.getElementById('pw-radius-slider').value);
+    document.getElementById('pw-rad-val').textContent = pwFmtDist(PW.radius);
+}
+
+// ── Manual coordinate entry ──
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('pw-lat')?.addEventListener('input', function() {
+        PW.lat = parseFloat(this.value) || null;
+        PW.name = document.getElementById('pw-search').value || 'Custom location';
+        pwCheckReady();
+    });
+    document.getElementById('pw-lng')?.addEventListener('input', function() {
+        PW.lng = parseFloat(this.value) || null;
+        pwCheckReady();
+    });
+});
+
+// ── Use GPS ──
+function pwUseGPS() {
+    if (!navigator.geolocation) { alert('Geolocation not available'); return; }
+    navigator.geolocation.getCurrentPosition(pos => {
+        PW.lat = pos.coords.latitude;
+        PW.lng = pos.coords.longitude;
+        PW.name = 'Current GPS position';
+        document.getElementById('pw-lat').value = PW.lat.toFixed(6);
+        document.getElementById('pw-lng').value = PW.lng.toFixed(6);
+        document.getElementById('pw-search').value = PW.name;
+        pwCheckReady();
+    }, err => alert('GPS error: ' + err.message), { enableHighAccuracy: true, timeout: 15000 });
+}
+
+// ── Validation ──
+function pwCheckReady() {
+    const ok = PW.lat !== null && PW.lng !== null && !isNaN(PW.lat) && !isNaN(PW.lng);
+    const btn = document.getElementById('pw-activate');
+    if (ok) {
+        btn.classList.add('pw-ready');
+        btn.classList.remove('pw-disabled');
+        btn.textContent = 'Activate ProxiWake';
+    } else {
+        btn.classList.remove('pw-ready');
+        btn.classList.add('pw-disabled');
+        btn.textContent = 'Enter destination to activate';
+    }
+}
+
+// ── Wake Lock (separate from MileSaver's) ──
+async function pwRequestWakeLock() {
+    try {
+        if ('wakeLock' in navigator) {
+            PW.wakeLock = await navigator.wakeLock.request('screen');
+            PW.wakeLock.addEventListener('release', () => {
+                document.getElementById('pw-wl-text').textContent = 'Released — reopen app to restore';
+                document.getElementById('pw-wl-dot').className = 'pw-status-dot pw-dot-yellow';
+            });
+            document.getElementById('pw-wl-text').textContent = 'Active — screen will stay on';
+            document.getElementById('pw-wl-dot').className = 'pw-status-dot pw-dot-green';
+        } else {
+            document.getElementById('pw-wl-text').textContent = 'Not supported — keep screen on manually';
+        }
+    } catch(e) { document.getElementById('pw-wl-text').textContent = 'Failed: ' + e.message; }
+}
+
+// Re-acquire on visibility (only if ProxiWake is active)
+document.addEventListener('visibilitychange', () => {
+    if (PW.active && document.visibilityState === 'visible' && !PW.wakeLock) pwRequestWakeLock();
+});
+
+// ── Alarm sound ──
+function pwPlayTone(lv) {
+    if (!PW.audioCtx) PW.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = PW.audioCtx, o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    if (lv === 1) { o.frequency.value = 440; g.gain.value = 0.12; o.type = 'sine'; }
+    else if (lv === 2) { o.frequency.value = 660; g.gain.value = 0.35; o.type = 'triangle'; }
+    else { o.frequency.value = 880; g.gain.value = 0.75; o.type = 'square'; }
+    o.start(); setTimeout(() => { o.stop(); o.disconnect(); g.disconnect(); }, 500);
+}
+
+// ── Trigger alarm ──
+function pwTriggerAlarm() {
+    if (PW.triggered) return;
+    PW.triggered = true;
+
+    if (navigator.vibrate) {
+        const pat = PW.alarm === 1 ? [300,100,300] : PW.alarm === 2 ? [500,200,500,200,500] : [1000,200,1000,200,1000,200,1000];
+        navigator.vibrate(pat);
+    }
+    if (PW.alarm >= 2) pwPlayTone(PW.alarm);
+
+    const iv = setInterval(() => {
+        if (navigator.vibrate) {
+            const p = PW.alarm === 1 ? [300,100,300] : PW.alarm === 2 ? [500,200,500,200,500] : [1000,200,1000,200,1000];
+            navigator.vibrate(p);
+        }
+        if (PW.alarm >= 2) pwPlayTone(PW.alarm);
+    }, PW.alarm === 3 ? 2000 : 4000);
+    PW.intervals.push(iv);
+
+    if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification('ProxiWake', { body: 'Arriving at ' + PW.name + '!', requireInteraction: true });
+    }
+
+    // Update UI to alert state
+    document.getElementById('pw-d-box').classList.add('pw-alert');
+    document.getElementById('pw-d-label').innerHTML = '<div class="pw-alert-text">WAKE UP — YOU\'RE ARRIVING</div>';
+    document.getElementById('pw-d-val').style.color = '#EF4444';
+    document.getElementById('pw-r-dot').className = 'pw-radar-dot pw-arriving';
+    document.querySelectorAll('.pw-radar-ring').forEach(r => r.style.borderColor = '#EF4444');
+    document.getElementById('pw-p-fill').style.background = '#EF4444';
+
+    // Flash for level 3
+    if (PW.alarm === 3) {
+        let on = false;
+        const fi = setInterval(() => {
+            on = !on;
+            document.getElementById('proxiwake-section').style.background = on ? '#1a0505' : '';
+        }, 300);
+        PW.intervals.push(fi);
+    }
+}
+
+// ── Activate ──
+function pwActivate() {
+    if (PW.lat === null || PW.lng === null) return;
+    // Guard: can't activate if MileSaver nav is running
+    if (state.isNavigating) {
+        alert('Exit MileSaver navigation first before activating ProxiWake.');
+        return;
+    }
+
+    PW.active = true; PW.triggered = false; PW.startTime = Date.now(); PW.initDist = null;
+    if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+
+    // Switch to tracking view
+    document.getElementById('pw-t-icon').textContent = PW.MODES[PW.mode].icon;
+    document.getElementById('pw-t-name').textContent = PW.name || 'Custom location';
+    document.getElementById('pw-t-coords').textContent = PW.lat.toFixed(4) + ', ' + PW.lng.toFixed(4) + ' · Radius: ' + pwFmtDist(PW.radius);
+    document.getElementById('pw-tgt-lat').textContent = PW.lat.toFixed(6);
+    document.getElementById('pw-tgt-lng').textContent = PW.lng.toFixed(6);
+    document.getElementById('pw-setup').style.display = 'none';
+    document.getElementById('pw-tracking').style.display = 'flex';
+
+    pwRequestWakeLock();
+    pwStartGPS();
+}
+
+function pwStartGPS() {
+    if (!navigator.geolocation) { document.getElementById('pw-d-val').textContent = 'GPS unavailable'; return; }
+    PW.watchId = navigator.geolocation.watchPosition(pwOnPos, pwOnErr, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+    const timer = setInterval(() => {
+        const sec = Math.floor((Date.now() - PW.startTime) / 1000);
+        const min = Math.floor(sec / 60);
+        document.getElementById('pw-elapsed').textContent = 'Tracking for ' + (min ? min + 'm ' : '') + (sec % 60) + 's';
+    }, 1000);
+    PW.intervals.push(timer);
+}
+
+function pwOnPos(pos) {
+    const lat = pos.coords.latitude, lng = pos.coords.longitude;
+    const dist = pwHaversine(lat, lng, PW.lat, PW.lng);
+    if (PW.initDist === null) PW.initDist = dist;
+
+    document.getElementById('pw-my-lat').textContent = lat.toFixed(6);
+    document.getElementById('pw-my-lng').textContent = lng.toFixed(6);
+    document.getElementById('pw-d-val').textContent = pwFmtDist(dist);
+
+    const pct = Math.max(0, Math.min(100, Math.round(100 - (dist / PW.initDist) * 100)));
+    document.getElementById('pw-p-fill').style.width = pct + '%';
+    document.getElementById('pw-pct').textContent = pct + '% there';
+
+    const bt = document.getElementById('pw-bat-text');
+    if (dist > PW.radius * 3) bt.textContent = 'Low-power — far away';
+    else if (dist > PW.radius) bt.textContent = 'Medium polling — approaching';
+    else bt.textContent = 'High-precision — almost there!';
+
+    if (dist <= PW.radius && !PW.triggered) pwTriggerAlarm();
+}
+
+function pwOnErr(err) {
+    document.getElementById('pw-d-val').textContent = 'GPS Error';
+    document.getElementById('pw-bat-text').textContent = err.message;
+}
+
+// ── Deactivate ──
+function pwDeactivate() {
+    PW.active = false; PW.triggered = false;
+    if (PW.watchId !== null) { navigator.geolocation.clearWatch(PW.watchId); PW.watchId = null; }
+    if (PW.wakeLock) { try { PW.wakeLock.release(); } catch(e) {} PW.wakeLock = null; }
+    PW.intervals.forEach(i => clearInterval(i)); PW.intervals = [];
+    if (navigator.vibrate) navigator.vibrate(0);
+    document.getElementById('proxiwake-section').style.background = '';
+
+    // Reset tracking UI
+    document.getElementById('pw-d-box').classList.remove('pw-alert');
+    document.getElementById('pw-d-label').textContent = 'Distance remaining';
+    document.getElementById('pw-d-val').style.color = '';
+    document.getElementById('pw-r-dot').className = 'pw-radar-dot pw-tracking';
+    document.querySelectorAll('.pw-radar-ring').forEach(r => r.style.borderColor = '');
+    document.getElementById('pw-p-fill').style.width = '0%';
+    document.getElementById('pw-p-fill').style.background = '';
+
+    // Switch back to setup
+    document.getElementById('pw-tracking').style.display = 'none';
+    document.getElementById('pw-setup').style.display = 'flex';
+}
