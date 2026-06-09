@@ -406,7 +406,7 @@ function initializeAutocomplete() {
         console.warn('Google Maps not loaded – autocomplete disabled');
         return;
     }
-    const options = { types: ['geocode', 'establishment'], componentRestrictions: { country: 'us' } };
+    const options = { types: ['geocode', 'establishment'] };
     try {
         const startAC = new google.maps.places.Autocomplete(document.getElementById('start-location'), options);
         const endAC = new google.maps.places.Autocomplete(document.getElementById('end-location'), options);
