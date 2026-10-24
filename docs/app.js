@@ -549,7 +549,8 @@ async function handleSearch() {
             // True only when both routes came from an engine that honoured the
             // distance-vs-time preference. False means no real comparison exists.
             comparable: shortestRoute.preferenceHonoured !== false
-                     && fastestRoute.preferenceHonoured !== false
+                     && fastestRoute.preferenceHonoured !== false,
+            degradedReason: shortestRoute.degradedReason || fastestRoute.degradedReason || null
         };
         state.routeComparison = comparison;
         drawRoutes(shortestRoute, fastestRoute);
@@ -578,11 +579,17 @@ async function handleSearch() {
 async function fetchRoute(start, end, preference) {
     // ORS is the only engine here that honours a distance-vs-time preference.
     // Free-tier 429/503 is usually transient, so retry once before falling back.
+    let reason = 'unavailable';
     for (let attempt = 0; attempt < 2; attempt++) {
         try {
             return await fetchORSRoute(start, end, preference);
         } catch (err) {
             console.warn(`ORS ${preference} attempt ${attempt + 1} failed:`, err.message);
+            if (err.orsCode === 2010) {
+                // One endpoint has no routable road nearby. Retrying cannot help.
+                reason = 'unroutable_point';
+                break;
+            }
             if (attempt === 0) await new Promise(r => setTimeout(r, 1200));
         }
     }
@@ -594,6 +601,7 @@ async function fetchRoute(start, end, preference) {
     // the UI never presents an identical pair as a real shortest-vs-fastest result.
     const route = await fetchOSRMRoute(start, end);
     route.preferenceHonoured = false;
+    route.degradedReason = reason;
     return route;
 }
 
@@ -607,10 +615,23 @@ async function fetchORSRoute(start, end, preference = 'fastest') {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             coordinates: [[start.lon, start.lat], [end.lon, end.lat]],
-            preference, instructions: true, units: 'm'
+            preference, instructions: true, units: 'm',
+            // ORS only searches 350 m for a routable road by default, which fails
+            // at airports, malls and campuses. -1 lifts that limit.
+            // NOTE: the Cloudflare proxy must forward `radiuses` for this to apply.
+            radiuses: [-1, -1]
         })
     });
-    if (!response.ok) throw new Error(`ORS error ${response.status}`);
+    if (!response.ok) {
+        // Keep the ORS error code: 2010 means "no road near this coordinate",
+        // which is permanent for this input and must not be retried.
+        let code = null;
+        try { code = (await response.clone().json())?.error?.code ?? null; } catch (e) {}
+        const err = new Error(`ORS error ${response.status}${code ? ` (code ${code})` : ''}`);
+        err.orsCode = code;
+        err.httpStatus = response.status;
+        throw err;
+    }
     const data = await response.json();
     if (!data.features?.length) throw new Error('No route found');
     const feature = data.features[0];
@@ -882,7 +903,10 @@ function displayResults(comparison) {
         // Both routes came from the time-only fallback engine, so they are the
         // same road. Say so instead of claiming the routes are "similar".
         card.className = 'recommendation-card warning';
-        card.innerHTML = `<div class="title">⚠️ Shortest route unavailable</div><div class="subtitle">The distance-routing service did not respond. This is the fastest route only — try again in a moment.</div>`;
+        const why = comparison.degradedReason === 'unroutable_point'
+            ? 'One of your locations is not beside a mapped road — common for airports, malls and campuses. Try a street address or a nearby entrance.'
+            : 'The distance-routing service did not respond. Try again in a moment.';
+        card.innerHTML = `<div class="title">⚠️ Shortest route unavailable</div><div class="subtitle">${why} Showing the fastest route only.</div>`;
         updateSavingsDisplay();
         return;
     }
