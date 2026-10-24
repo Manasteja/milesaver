@@ -1,4 +1,4 @@
-const CACHE_NAME = 'milesaver-v14.2';
+const CACHE_NAME = 'milesaver-v14.3';
 const urlsToCache = [
     '/',
     '/index.html',

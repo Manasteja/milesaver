@@ -527,10 +527,15 @@ async function handleSearch() {
         state.endCoords = end;
         addMarkers(start, end);
 
-        const [shortestRoute, fastestRoute] = await Promise.all([
+        let [shortestRoute, fastestRoute] = await Promise.all([
             fetchRoute(start, end, 'shortest'),
             fetchRoute(start, end, 'fastest')
         ]);
+        // If the engine handed back a "shortest" that is actually longer, the
+        // labels are backwards. Swap so the cards always tell the truth.
+        if (shortestRoute.distance > fastestRoute.distance) {
+            [shortestRoute, fastestRoute] = [fastestRoute, shortestRoute];
+        }
         state.shortestRouteData = shortestRoute;
         state.fastestRouteData = fastestRoute;
         state.routesAnalyzed = 2;
@@ -540,7 +545,11 @@ async function handleSearch() {
         const comparison = {
             shortestRoute, fastestRoute,
             milesSaved: fastestRoute.distance - shortestRoute.distance,
-            extraTime: shortestRoute.duration - fastestRoute.duration
+            extraTime: shortestRoute.duration - fastestRoute.duration,
+            // True only when both routes came from an engine that honoured the
+            // distance-vs-time preference. False means no real comparison exists.
+            comparable: shortestRoute.preferenceHonoured !== false
+                     && fastestRoute.preferenceHonoured !== false
         };
         state.routeComparison = comparison;
         drawRoutes(shortestRoute, fastestRoute);
@@ -567,15 +576,25 @@ async function handleSearch() {
 // ==========================================
 
 async function fetchRoute(start, end, preference) {
-    try {
-        const route = await fetchORSRoute(start, end, preference);
-        return route;
-    } catch (err) { console.warn(`ORS ${preference} failed:`, err.message); }
+    // ORS is the only engine here that honours a distance-vs-time preference.
+    // Free-tier 429/503 is usually transient, so retry once before falling back.
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            return await fetchORSRoute(start, end, preference);
+        } catch (err) {
+            console.warn(`ORS ${preference} attempt ${attempt + 1} failed:`, err.message);
+            if (attempt === 0) await new Promise(r => setTimeout(r, 1200));
+        }
+    }
     try {
         const w = preference === 'shortest' ? 'short_fastest' : 'fastest';
         return await fetchGraphHopperRoute(start, end, w);
     } catch (err) { console.warn('GraphHopper failed:', err.message); }
-    return await fetchOSRMRoute(start, end);
+    // OSRM returns one time-optimised route and ignores `preference`. Flag it so
+    // the UI never presents an identical pair as a real shortest-vs-fastest result.
+    const route = await fetchOSRMRoute(start, end);
+    route.preferenceHonoured = false;
+    return route;
 }
 
 // ==========================================
@@ -859,6 +878,14 @@ function displayResults(comparison) {
     document.getElementById('fastest-duration').textContent = `~${Math.round(fastestRoute.duration)} min`;
     document.getElementById('routes-analyzed').textContent = `Analyzed ${state.routesAnalyzed} routes`;
     const card = document.getElementById('recommendation-card');
+    if (comparison.comparable === false) {
+        // Both routes came from the time-only fallback engine, so they are the
+        // same road. Say so instead of claiming the routes are "similar".
+        card.className = 'recommendation-card warning';
+        card.innerHTML = `<div class="title">⚠️ Shortest route unavailable</div><div class="subtitle">The distance-routing service did not respond. This is the fastest route only — try again in a moment.</div>`;
+        updateSavingsDisplay();
+        return;
+    }
     if (milesSaved >= minSavings && milesSaved > 0.1) {
         if (Math.abs(extraTime) <= timeTolerance) {
             card.className = 'recommendation-card success';
