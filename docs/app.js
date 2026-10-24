@@ -44,9 +44,15 @@ const CONFIG = {
     WRONG_WAY_ANGLE: 120, // degrees off-bearing to trigger
     WRONG_WAY_SPEED: 3,   // m/s minimum speed to evaluate
 
-    // Tile providers
+    // Tile providers.
+    // CARTO started requiring an API key and now serves an "API KEY REQUIRED"
+    // placeholder tile, so night mode uses Esri's Dark Gray Canvas instead.
+    // Esri splits it into a base layer and a separate labels layer.
     LIGHT_TILES: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    DARK_TILES: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    DARK_TILES: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    DARK_LABELS: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
+    ATTRIB_LIGHT: '© OpenStreetMap',
+    ATTRIB_DARK: 'Tiles © Esri',
 };
 
 const state = {
@@ -107,6 +113,8 @@ const state = {
     isNightActive: false,
     fullscreenTileLayer: null,
     mainTileLayer: null,
+    mainLabelsLayer: null,       // dark-mode labels overlay (Esri)
+    fullscreenLabelsLayer: null,
     minProgressIndex: 0,       // monotonic advancement
     overpassCache: {},          // keyed by bounds hash
     tripHistory: [],
@@ -188,9 +196,10 @@ function initializeApp() {
 function initializeMap() {
     state.map = L.map('map', { zoomControl: true }).setView([47.6062, -122.3321], 10);
     state.mainTileLayer = L.tileLayer(getCurrentTileUrl(), {
-        attribution: '© OpenStreetMap © CartoDB',
+        attribution: state.isNightActive ? CONFIG.ATTRIB_DARK : CONFIG.ATTRIB_LIGHT,
         maxZoom: 19
     }).addTo(state.map);
+    applyTiles();
 }
 
 function setupSliders() {
@@ -251,11 +260,24 @@ function toggleNightMode() {
 
 function applyTiles() {
     const url = getCurrentTileUrl();
-    if (state.mainTileLayer) {
-        state.mainTileLayer.setUrl(url);
-    }
-    if (state.fullscreenTileLayer) {
-        state.fullscreenTileLayer.setUrl(url);
+    if (state.mainTileLayer) state.mainTileLayer.setUrl(url);
+    if (state.fullscreenTileLayer) state.fullscreenTileLayer.setUrl(url);
+
+    // The dark basemap ships without street names, so labels ride on their own
+    // layer. Add it in night mode, take it away in day mode.
+    syncLabelsLayer('mainLabelsLayer', state.map);
+    syncLabelsLayer('fullscreenLabelsLayer', state.fullscreenMap);
+}
+
+function syncLabelsLayer(stateKey, map) {
+    if (!map) return;
+    if (state.isNightActive) {
+        if (!state[stateKey]) {
+            state[stateKey] = L.tileLayer(CONFIG.DARK_LABELS, { maxZoom: 19, zIndex: 2 });
+        }
+        if (!map.hasLayer(state[stateKey])) state[stateKey].addTo(map);
+    } else if (state[stateKey] && map.hasLayer(state[stateKey])) {
+        map.removeLayer(state[stateKey]);
     }
 }
 
@@ -1109,6 +1131,7 @@ async function startFullscreenNavigation() {
         state.fullscreenMap = L.map('fullscreen-map', { zoomControl: false, attributionControl: false })
             .setView([state.startCoords.lat, state.startCoords.lon], 17);
         state.fullscreenTileLayer = L.tileLayer(getCurrentTileUrl(), { maxZoom: 19 }).addTo(state.fullscreenMap);
+        syncLabelsLayer('fullscreenLabelsLayer', state.fullscreenMap);
 
         state.fullscreenMap.on('dragstart', () => {
             state.isPanning = true;
@@ -1125,6 +1148,7 @@ async function startFullscreenNavigation() {
     } else {
         // Refresh tile layer for night mode changes
         if (state.fullscreenTileLayer) state.fullscreenTileLayer.setUrl(getCurrentTileUrl());
+        syncLabelsLayer('fullscreenLabelsLayer', state.fullscreenMap);
     }
 
     // Clean up old layers

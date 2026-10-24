@@ -1,4 +1,4 @@
-const CACHE_NAME = 'milesaver-v14.5';
+const CACHE_NAME = 'milesaver-v14.6';
 // Paths are RELATIVE to this worker's own location. The app is served from
 // /milesaver/, not the domain root, so absolute paths like '/index.html' point
 // at the wrong page and make cache.addAll() reject — which silently disables
