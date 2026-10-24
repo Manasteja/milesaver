@@ -8,8 +8,15 @@
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    
+    <!-- Home-screen label on iOS. Without it iOS uses the full <title>, which is too long. -->
+    <meta name="apple-mobile-web-app-title" content="MileSaver">
+
     <link rel="manifest" href="manifest.json">
+    <!-- iOS ignores the manifest icons and needs this one. Without it the home
+         screen shows a blurry screenshot of the page instead of an icon. -->
+    <link rel="apple-touch-icon" href="apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
     <title>MileSaver - Save Miles, Save Money</title>
     
     <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB0Myd1fHF7Wd6y0zsxXuTuRv4lG4T_3h0&libraries=places&callback=Function.prototype"></script>
